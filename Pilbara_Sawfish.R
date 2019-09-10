@@ -19,18 +19,18 @@ library(pscl)  #zero-inflated models
 library('dismo')
 library(glmmADMB)
 library(nlme)
-library(MuMIn)  #R2 glmm Nakagawa, S, Schielzeth, H. (2013). A general and simple method for obtaining R² 
+library(MuMIn)  #R2 glmm Nakagawa, S, Schielzeth, H. (2013). A general and simple method for obtaining R? 
                 #from Generalized Linear Mixed-effects Models. Methods in Ecology and Evolution 4: 133-142
 library(brglm)  #biased corrected glm
-
+library(dplyr)
 #any(grepl("rpart", installed.packages()))  #check if rpart is installed
 
-source("C:/Matias/Analyses/SOURCE_SCRIPTS/Population dynamics/fn.fig.R")
+source("C:/Matias/Analyses/SOURCE_SCRIPTS/Git_Population.dynamics/fn.fig.R")
 Do.tiff="NO"    #select figure extension
 Do.jpeg="YES"
-source("C:/Matias/Analyses/SOURCE_SCRIPTS/Plot.Map.R") 
+source("C:/Matias/Analyses/SOURCE_SCRIPTS/Git_other/Plot.Map.R") 
 
-setwd('C:/Matias/Analyses/Pilbara/Sawfish_catch_rate')
+setwd('C:/Matias/Analyses/Sawfish/Pilbara')
 Data=read.csv('data.csv',stringsAsFactors=F)
 
 
@@ -525,16 +525,17 @@ if(do.exploratory=="YES")
 }
 
 #Look at temperature
-Temp=read.csv("C:/Matias/Data/SST.nice.format.csv")
+Temp=read.csv("C:/Matias/Data/Oceanography/SST.csv")
 Temp=subset(Temp,Lat>(-21) & Lat<(-17) &Long<121 & Long>114)
 plot(Temp$Long,Temp$Lat)
-Ag.T=aggregate(Temperature~Year+Month,Temp,mean)
+Temp$Temperature=Temp$value
+Ag.T=aggregate(Temperature~year+month,Temp,mean)
 head(Ag.T)
 plot(1,col="transparent",xlim=c(1,12),ylim=c(21,31))
-Yr=unique(Ag.T$Year);CL=1:12;for(i in 1:12) with(subset(Ag.T,Year==Yr[i]),lines(Month,Temperature,col=CL[i]))
+Yr=unique(Ag.T$Year);CL=1:12;for(i in 1:12) with(subset(Ag.T,year==Yr[i]),lines(month,Temperature,col=CL[i]))
 
-Avg.ann.T=aggregate(Temperature~Month,Temp,mean)
-Data=merge(Data,Avg.ann.T,by.x="StartDate.mn",by.y="Month",all.x=T)
+Avg.ann.T=aggregate(Temperature~month,Temp,mean)
+Data=merge(Data,Avg.ann.T,by.x="StartDate.mn",by.y="month",all.x=T)
 
 #Add annual effort
 Ann.eff=aggregate(cbind(SawfishGreen,SawfishNarrow,hrs.trawld)~StartDate.yr,Data,sum)
@@ -560,6 +561,35 @@ Data=subset(Data,!VESSEL=="")
 
 #2. Data analyses
 setwd(WD)
+
+#Calculate annual catch rates
+    ## Arithmetic Mean CPUE
+Effort.scaler=1000  #in hours
+fn.cpue=function(d,var)
+{
+  out = d %>%
+    mutate(cpue=Effort.scaler*get(var)/hrs.trawld,
+           year=as.numeric(StartDate.yr))%>%
+    group_by(year) %>%
+    summarise(mean = mean(cpue),
+              n = length(cpue),
+              sd = sd(cpue)) %>%
+    mutate(lowCL = mean - 1.96*sd/sqrt(n),
+           uppCL = mean + 1.96*sd/sqrt(n)) %>%
+    as.data.frame
+  return(out)
+}
+Narrow.cpue=fn.cpue(d=Data%>%select(StartDate.yr,hrs.trawld,SawfishNarrow,SawfishGreen),var="SawfishNarrow")
+Green.cpue=fn.cpue(d=Data%>%select(StartDate.yr,hrs.trawld,SawfishNarrow,SawfishGreen),var="SawfishGreen")
+
+fn.fig("Annual cpue",2400,2400)
+plot(Narrow.cpue$year,Narrow.cpue$mean,ylab=paste('Numbers caught per',Effort.scaler,'trawled hour',sep=" "),xlab="Year",
+     ylim=c(0,max(c(Narrow.cpue$uppCL,Green.cpue$uppCL))),pch=19,cex=1.5)
+with(Narrow.cpue,segments(year,lowCL,year,uppCL,lwd=2))
+points(Green.cpue$year+.2,Green.cpue$mean,cex=1.5,pch=19,col="grey60")
+with(Green.cpue,segments(year+.2,lowCL,year+.2,uppCL,lwd=2,col="grey60"))
+dev.off()
+
 
 #Correlations among predictors
 Chck.Corr="NO"
@@ -960,8 +990,8 @@ fn.Fig1=function(DATA,species,numInt)
 fn.fig("Figure 1",1600,2400)
 smart.par(n.plots=length(Species),MAR=c(2,2,.1,1),OMA=c(1,2,.2,.2),MGP=c(2.5,.5,0))
 for(s in 1:length(Species))  fn.Fig1(DATA=Data,species=Species[s],numInt=20)
-mtext("Longitude (°E)",1,outer=T,cex=1.5,line=-0.25)
-mtext("Latitude (°S)",2,las=3,outer=T,cex=1.5,line=0.6)
+mtext("Longitude (?E)",1,outer=T,cex=1.5,line=-0.25)
+mtext("Latitude (?S)",2,las=3,outer=T,cex=1.5,line=0.6)
 
 #inset OZ
 library(PBSmapping)
@@ -1146,8 +1176,8 @@ fn.S2=function(DATA,VAR,numInt)
     legend('topleft',c(paste(sum(aa[,id]),Species[1]),paste(sum(aa1[,iid]),Species[2])),
            bty='n',cex=1.1,text.col=c(CL1,CL2))
   }
-  mtext("Longitude (°E)",1,outer=T)
-  mtext("Latitude (°S)",2,line=0.5,las=3,outer=T)
+  mtext("Longitude (?E)",1,outer=T)
+  mtext("Latitude (?S)",2,line=0.5,las=3,outer=T)
 }
 fn.fig("S2_interactions_by_year",2400,2400)
 fn.S2(DATA=Data,VAR='StartDate.yr',numInt=20)
@@ -1249,7 +1279,7 @@ fn.marg.eff=function(d,modl)
                    depth = mean(d$depth),
                    hrs.trawld = mean(d$hrs.trawld))
   PREDS.average=predict(modl,nd,type='response',se.fit =T)
-  Avg.pred=paste(round(1-PREDS.average$fit,4),round(PREDS.average$se.fit,4),sep="±")
+  Avg.pred=paste(round(1-PREDS.average$fit,4),round(PREDS.average$se.fit,4),sep="?")
   names(Avg.pred)=c("AuWin","SprSu")
   return(Avg.pred)
 }
