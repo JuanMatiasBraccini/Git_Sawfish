@@ -4,7 +4,7 @@
 
 rm(list=ls(all=TRUE))
 
-# DATA SECTION
+# DATA SECTION-------------------------------------------------------------------------
 library(lubridate)
 library(chron)
 library(plotrix)
@@ -24,6 +24,7 @@ library(MuMIn)  #R2 glmm Nakagawa, S, Schielzeth, H. (2013). A general and simpl
 library(brglm)  #biased corrected glm
 library(dplyr)
 #any(grepl("rpart", installed.packages()))  #check if rpart is installed
+library("readxl")
 
 source("C:/Matias/Analyses/SOURCE_SCRIPTS/Git_Population.dynamics/fn.fig.R")
 Do.tiff="NO"    #select figure extension
@@ -31,29 +32,28 @@ Do.jpeg="YES"
 source("C:/Matias/Analyses/SOURCE_SCRIPTS/Git_other/Plot.Map.R") 
 
 setwd('C:/Matias/Analyses/Sawfish/Pilbara')
-Data=read.csv('data.csv',stringsAsFactors=F)
-
+#Data=read.csv('Data/data.csv',stringsAsFactors=F)
+#Data <- read_excel("Data/20210330_1549 - Output.xlsx", sheet = "Sheet1")
+Data=read.csv('Data/20210330_1549 - Output.csv',stringsAsFactors=F)
 
 Current.date=as.POSIXlt(Sys.Date())
 
-# PARAMETERS SECTION
+
+# PARAMETERS SECTION-------------------------------------------------------------------------
+trawl.hour_max=7
+Current.year=2020 #last year with complete data
+do.effort.cut="NO"  #if cutting effort at different levels
 
 
+# Data manipulation-------------------------------------------------------------------------
 
-# PROCEDURE SECTION
-
-#1. Data manipulation
-#turn times to time variable
-Data$StartTime=chron(times=paste(Data$StartTime,":00",sep=''))
-Data$EndTime=chron(times=paste(Data$EndTime,":00",sep=''))
-
-#turn dates into date variable
-Data$UNLOAD=as.POSIXlt(as.character(Data$UNLOAD),format='%d/%m/%Y')
-Data$StartDate=as.POSIXlt(as.character(Data$StartDate),format='%d/%m/%Y')
-Data$EndDate=as.POSIXlt(as.character(Data$EndDate),format='%d/%m/%Y')
-
-#SuMERY=summary(Data)
-#write.csv(SuMERY,"summary.csv")
+#turn times to time variable and dates to date variables
+Data=Data%>%
+      mutate(StartTime=chron(times=StartTime),
+             EndTime=chron(times=EndTime),
+             UNLOAD=as.POSIXlt(as.character(UNLOAD),format='%d/%m/%Y'),
+             StartDate=as.POSIXlt(as.character(StartDate),format='%d/%m/%Y'),
+             EndDate=as.POSIXlt(as.character(EndDate),format='%d/%m/%Y'))
 
 #extract year, month and day
 Data$UNLOAD.yr=with(Data,year(UNLOAD))
@@ -74,16 +74,21 @@ Data$EndDate.Time=ymd_hms(with(Data,paste(as.character(EndDate),as.character(End
 Data$Start.hour=hour(Data$StartDate.Time)
 Data$End.hour=hour(Data$EndDate.Time)
 
-Data$StartDate.yr=with(Data,ifelse(StartDate.yr==2107,2017,StartDate.yr))
-Data$EndDate.yr=with(Data,ifelse(EndDate.yr==2107,2017,StartDate.yr))
+#Data$StartDate.yr=with(Data,ifelse(StartDate.yr==2107,2017,StartDate.yr))
+#Data$EndDate.yr=with(Data,ifelse(EndDate.yr==2107,2017,StartDate.yr))
 
+#Calculate hours trawled
 Data$hrs.trawld=as.numeric(difftime(Data$EndDate.Time,Data$StartDate.Time,units="hours"))
 
 
-#Sum dolphins and sawsharks
-Data$Dolphin=Data$DolphinALIVE+Data$DolphinDEAD
-Data$SawfishNarrow=Data$SawfishNarrowALIVE+Data$SawfishNarrowDEAD
-Data$SawfishGreen=Data$SawfishGreenALIVE+Data$SawfishGreenDEAD
+#Sum sawsharks
+Data=Data%>%
+  mutate(SawfishNarrowALIVE=ifelse(is.na(SawfishNarrowALIVE),0,SawfishNarrowALIVE),
+         SawfishNarrowDEAD=ifelse(is.na(SawfishNarrowDEAD),0,SawfishNarrowDEAD),
+         SawfishGreenALIVE=ifelse(is.na(SawfishGreenALIVE),0,SawfishGreenALIVE),
+         SawfishGreenDEAD=ifelse(is.na(SawfishGreenDEAD),0,SawfishGreenDEAD),
+         SawfishNarrow=SawfishNarrowALIVE+SawfishNarrowDEAD,
+         SawfishGreen=SawfishGreenALIVE+SawfishGreenDEAD)
 
 smart.par=function(n.plots,MAR,OMA,MGP) return(par(mfrow=n2mfrow(n.plots),mar=MAR,oma=OMA,las=1,mgp=MGP))
 
@@ -94,9 +99,9 @@ Ktch.vars=c("TotalCatch","TotalDiscard","TotalBEEmp","TotalBSSnapper","TotalThre
             "TotalRedEmp","TotalRankinCod","TotalFrypan","TotalSaddletail",     
             "TotalSpangledEmp","TotalCrimSnapper","TotalGoldband")
 Effort.vars=c("SWEEPS","HEADROPE","BRIDLE","HRGridDistance")
-varlist=c(Effort.vars,"AREA","SDEPTH",Ktch.vars)
-Predictors=c("Skipper", "VESSEL","StartDate.yr","StartDate.mn","Start.hour",varlist,"SLAT","SLONG")
-covars=c("long","lat","SLAT","SLONG",Effort.vars,"depth",Ktch.vars)
+varlist=c("AREA","SDEPTH")
+Predictors=c("VESSEL","StartDate.yr","StartDate.mn","Start.hour",varlist,"SLAT","SLONG")
+covars=c("long","lat","SLAT","SLONG","depth")
 
 
 #mid points (lat,long depth)
@@ -104,16 +109,14 @@ Data$long <- apply(Data[,c("SLONG","ELONG")], 1, mean,na.rm=T)
 Data$lat <- apply(Data[,c("SLAT","ELAT")], 1, mean,na.rm=T)  
 Data$depth <- apply(Data[,c("SDEPTH","EDEPTH")], 1, mean,na.rm=T)  
 
+#Select data post 2005 and complete years
+Data=subset(Data,StartDate.yr>2005 & StartDate.yr<=Current.year)
 
 
 #flag and fix typos
-Data=subset(Data,StartDate.yr>2005)
-
-Data$depth=with(Data,ifelse(SDEPTH>125 | SDEPTH<5 ,EDEPTH,SDEPTH))
-Data$depth=with(Data,ifelse(is.na(depth),EDEPTH,depth))
 Data$LFB=with(Data,ifelse(LFB=="f550","F550",LFB))
-Data$Skipper=with(Data,paste(FirstName,Surname))
-Data$Skipper=with(Data,ifelse(Skipper==" ","Unknown",Skipper))
+#Data$Skipper=with(Data,paste(FirstName,Surname))
+#Data$Skipper=with(Data,ifelse(Skipper==" ","Unknown",Skipper))
 
 wrong.total.catch=c(154222, 125202, 120177, 154921, 154109, 134415)
 Data=subset(Data,!HC%in%wrong.total.catch)
@@ -125,405 +128,546 @@ Data=subset(Data,!HC%in%Wrong.hours.combined.shots)
 Data=subset(Data,hrs.trawld>=10/60) #keep records trawling for at least 10 mins (no sawfish caught in less than 10 mins)
 Data=subset(Data,!HC==124586)  #combined shots into one record
 
+
+
+# Data exploration-------------------------------------------------------------------------
 do.exploratory="NO"
 if(do.exploratory=="YES")
 {
-  setwd(paste(WD,"Preliminary",sep='/'))
-  fn.date.chck=function(x,y)
+  fn=function(dd,LBL)
   {
-    id=which(Data[,match(x,names(Data))]>y)
-    if(length(id>0)) return(Data[id,match(c('HC',x),names(Data))])
+    dd%>%
+      ggplot(aes(x=VAR, y=cpue)) + 
+      geom_violin(width=1.5,fill="orange") +
+      geom_boxplot(width=0.1, color="grey40", fill="chartreuse2")+
+      ggtitle("Positive catches")+
+      ylab("CPUE (numbers per trawled hour)")+xlab(LBL)
   }
   
-  typo.UNLOAD.yr=fn.date.chck("UNLOAD.yr",year(Current.date))
-  typo.StartDate.yr=fn.date.chck("StartDate.yr",year(Current.date))
-  typo.EndDate.yr=fn.date.chck("EndDate.yr",year(Current.date))
-  
-  typo.UNLOAD.mn=fn.date.chck("UNLOAD.mn",12)
-  typo.StartDate.mn=fn.date.chck("StartDate.mn",12)
-  typo.EndDate.mn=fn.date.chck("EndDate.mn",12)
-  
-  typo.UNLOAD.dy=fn.date.chck("UNLOAD.dy",31)
-  typo.StartDate.dy=fn.date.chck("StartDate.dy",31)
-  typo.EndDate.dy=fn.date.chck("EndDate.dy",31)
-  
-  
-  fun1=function(What)
+  Explore.fn=function(SP)
   {
-    x=Data[,match(What,names(Data))]
-    RANG=range(x,na.rm=T)
-    QUANT=quantile(x,probs=seq(0,1,.01),na.rm=T)
-    plot(density(x,adjust = 2,na.rm=T),main=What,xlab="",yaxt='n',ylab="")
-    legend('top',paste(RANG,collapse="-"),bty='n')
-    n=length(QUANT)
-    text(QUANT[n-1],0,"    99%",col=2,srt=90,font=2,pos=3,cex=1.25)
-    text(QUANT[n],0,"    100%",col=2,srt=90,font=2,pos=3,cex=1.25)
-  }
-  fn.fig("predictor_dist",1600,2400)
-  par(mfcol=c(7,3),mai=c(.2,.2,.2,.1),oma=c(1,1.25,1,.1),las=1,mgp=c(1.5,.5,0))
-  for(i in 1:length(varlist))fun1(What=varlist[i])
-  mtext("Density",2,outer=T,las=3,line=-1,cex=1.75)
-  dev.off()
-  
-  fun2=function(What)
-  {
-    x=Data[,match(What,names(Data))]
-    QUANT=quantile(x,probs=seq(0,1,.01),na.rm=T)
-    plot(x,main="",xlab="",ylab="")
-    mtext(What,2,las=3,line=2.35,cex=.8)
-    abline(h=QUANT[match("75%",names(QUANT))],col="green")
-    abline(h=QUANT[match("99%",names(QUANT))],col="orange")
-    abline(h=QUANT[match("100%",names(QUANT))],col="red")
+    pdf(paste("Exploratory/",SP,".pdf",sep=''))
     
+    #trawled hours
+    p=qplot(Data$hrs.trawld, geom="histogram")+
+      xlab("Hours trawled")+ylab("Frequency")+
+      ggtitle(paste("trawled hours: median=",round(median(Data$hrs.trawld),2),"; range=",
+                    paste(round(range(Data$hrs.trawld),2),collapse='-'),sep=''))
+    print(p)
+    
+    # check records with too long trawls
+    p=Data%>%filter(hrs.trawld>trawl.hour_max)
+    lbl=paste("Number of sawfish caught=",sum(p$SawfishGreen)+sum(p$SawfishNarrow),sep='')
+    pp=qplot(p$hrs.trawld, geom="histogram")+
+      xlab("Hours trawled")+ylab("Frequency")+
+      ggtitle(label = paste("Shots with more than",trawl.hour_max,"hours trawled"),
+              subtitle = lbl)
+    print(pp)
+    
+    d=Data%>%filter(hrs.trawld<=trawl.hour_max)
+    
+    #map interactions by month
+    Effrt=d %>%
+      group_by(EndDate.mn)%>%
+      summarise(Effort=round(sum(hrs.trawld)))
+    
+    out = d %>%
+      group_by(EndDate.mn,long,lat)%>%
+      summarise(Sum = sum(get(SP)))%>%
+      filter(Sum>0)%>%
+      left_join( Effrt,by='EndDate.mn')%>%
+      mutate(Mn=factor(paste(EndDate.mn," (",Effort," trawled h)",sep='')))
+    
+    zero.c = d %>%
+      group_by(EndDate.mn,long,lat)%>%
+      summarise(Sum = sum(get(SP)))%>%
+      filter(Sum==0)%>%
+      left_join( Effrt,by='EndDate.mn')%>%
+      mutate(Mn=factor(paste(EndDate.mn," (",Effort," trawled h)",sep='')))
+    
+    p=out%>%
+      ggplot(aes(x=long,y=lat))+
+      geom_point(data=zero.c,aes(x=long,y=lat),alpha = .1,col="forestgreen")+
+      geom_point(aes(size=Sum),col="orange")+
+      facet_wrap(~Mn)+
+      ggtitle("Numbers caught")+
+      theme(legend.position = "top",
+            legend.title=element_blank())
+    print(p)
+    
+    
+    #plot interactions by year
+    p <- d%>%
+      filter(get(SP)>0)%>%
+      ggplot(aes(x=factor(StartDate.yr), y=get(SP))) + 
+      geom_bar(stat="identity")+ggtitle("Positive catches")+
+      ylab("Interactions")+xlab('StartDate.yr')
+    print(p)
+    
+    #plot interactions by month
+    p <- d%>%
+      filter(get(SP)>0)%>%
+      ggplot(aes(x=factor(StartDate.mn), y=get(SP))) + 
+      geom_bar(stat="identity")+ggtitle("Positive catches")+
+      ylab("Interactions")+xlab('StartDate.mn')
+    print(p)
+    
+    #plot interactions by hour
+    p <- d%>%
+      filter(get(SP)>0)%>%
+      ggplot(aes(x=factor(Start.hour), y=get(SP))) + 
+      geom_bar(stat="identity")+ggtitle("Positive catches")+
+      ylab("Interactions")+xlab('Start.hour')
+    print(p)
+    
+    #calculate cpue
+    d=d%>%mutate(cpue=get(SP)/hrs.trawld)
+    
+    #plot cpue by year
+    p=fn(dd=d%>%
+           filter(cpue>0)%>%
+           mutate(VAR=factor(StartDate.yr)),
+         LBL='StartDate.yr')
+    print(p)
+    
+    p=fn(dd=d%>%
+           filter(cpue>0 & cpue<3)%>%
+           mutate(VAR=factor(StartDate.yr)),
+         LBL='StartDate.yr')
+    print(p)
+    
+    
+    #plot cpue by month
+    p=fn(dd=d%>%
+           filter(cpue>0)%>%
+           mutate(VAR=factor(StartDate.mn)),
+         LBL='StartDate.mn')
+    print(p)
+    
+    p=fn(dd=d%>%
+           filter(cpue>0 & cpue<3)%>%
+           mutate(VAR=factor(StartDate.mn)),
+         LBL='StartDate.mn')
+    print(p)
+    
+    
+    #plot cpue by longitude
+    p=fn(dd=d%>%
+           filter(cpue>0)%>%
+           mutate(VAR=factor(round(long))),
+         LBL='Long')
+    print(p)
+    
+    p=fn(dd=d%>%
+           filter(cpue>0 & cpue<3)%>%
+           mutate(VAR=factor(round(long))),
+         LBL='Long')
+    print(p)
+    
+    
+    #plot cpue by Depth
+    p=fn(dd=d%>%
+           filter(cpue>0 & !is.na(depth))%>%
+           mutate(VAR=factor(10*round(depth/10))),
+         LBL='depth')
+    print(p)
+    
+    p=fn(dd=d%>%
+           filter(cpue>0 & cpue<3& !is.na(depth))%>%
+           mutate(VAR=factor(10*round(depth/10))),
+         LBL='depth')
+    print(p)
+    
+    
+    #plot cpue by TotalCatch
+    p=fn(dd=d%>%
+           filter(cpue>0)%>%
+           mutate(VAR=factor(1000*round(TotalCatch/1000))),
+         LBL='TotalCatch')
+    print(p)
+    
+    p=fn(dd=d%>%
+           filter(cpue>0 & cpue<3 & !is.na(depth))%>%
+           mutate(VAR=factor(1000*round(TotalCatch/1000))),
+         LBL='TotalCatch')
+    print(p)
+    
+    
+    dev.off()
   }
-  fn.fig("predictor_dist2",1600,2400)
-  par(mfcol=c(7,3),mai=c(.2,.4,.1,.1),oma=c(.1,1.25,.1,.1),las=1,mgp=c(1,.5,0))
-  for(i in 1:length(varlist))fun2(What=varlist[i])
-  dev.off()
+  for(s in 1:length(Species))  Explore.fn(SP=Species[s])
   
-  
-  #HOURS TRAWLED
-  fn.fig("Hours_tralwed",1600,2400)
-  par(mfcol=c(2,1),mai=c(.2,.2,.2,.1),oma=c(1,1.25,1,.1),las=1,mgp=c(1.5,.5,0))
-  fun1(What="hrs.trawld")
-  mtext("Density",2,las=3,line=1,cex=1.75)
-  
-  fun2(What="hrs.trawld")
-  dev.off()
-  
-  
-  #spatial distribution of species-gear interactions
-  #effort as number of shots
-  fn.1=function(species,VAR)
+  #some further explorations
+  do.further=FALSE
+  if(do.further)
   {
-    id=match(species,names(Data))
-    a=Data[Data[,id]>0,]
-    XLIM=range(a$SLONG)
-    YLIM=range(a$SLAT)
-    vaR=sort(unique(Data[,match(VAR,names(Data))]))
-    #vaR=sort(unique(a[,match(VAR,names(a))]))
-    CL=rgb(.1,.1,.2,alpha=0.2)
-    smart.par(n.plots=length(vaR),MAR=c(2,2,1,1),OMA=c(1.75,2,.5,.1),MGP=c(1,.5,0))
-    for(y in 1:length(vaR))
+    fn.date.chck=function(x,y)
     {
-      #with(Data[Data[,match(VAR,names(Data))]==vaR[y],],smoothScatter(SLONG,SLAT, nrpoints = 0,ylab="",xlab="",ylim=YLIM,xlim=XLIM))  #number of shots
-      with(Data[Data[,match(VAR,names(Data))]==vaR[y],],plot(SLONG,SLAT,ylab="",xlab="",pch=21,col=CL,bg=CL,ylim=YLIM,xlim=XLIM))
-      aa=a[a[,match(VAR,names(a))]==vaR[y],]
-      if(nrow(aa)>0)with(aa,points(SLONG,SLAT,pch=21,col='white',bg='deepskyblue2',cex=1.5))   
-      #if(y==1)legend('topleft',c("shots","shots with interaction"),pch=21,col=c(CL,1),pt.bg=c(CL,'deepskyblue2'),bty='n',cex=0.9)
-      legend('bottomright',paste(vaR[y]," (",sum(aa[,id])," inter.)",sep=""),bty='n',cex=1.1,text.col="firebrick")
+      id=which(Data[,match(x,names(Data))]>y)
+      if(length(id>0)) return(Data[id,match(c('HC',x),names(Data))])
     }
-    mtext("Longitude",1,outer=T)
-    mtext("Latitude",2,line=0.5,las=3,outer=T)
-    mtext(species,3,line=-1,outer=T)
-  }
-  #year
-  for(s in 1:length(Species))
-  {
-    fn.fig(paste("spatial_inter_year_n_shots",Species[s],sep="_"),2400,2400)
-    fn.1(species=Species[s],VAR='StartDate.yr')
-    dev.off()
-  }
-  #month
-  for(s in 1:length(Species))
-  {
-    fn.fig(paste("spatial_inter_month_n_shots",Species[s],sep="_"),2400,2400)
-    fn.1(species=Species[s],VAR='StartDate.mn')
-    dev.off()
-  }
-  #hour
-  for(s in 1:length(Species))
-  {
-    fn.fig(paste("spatial_inter_hour_n_shots",Species[s],sep="_"),2400,2400)
-    fn.1(species=Species[s],VAR='Start.hour')
-    dev.off()
-  }
-  #Skipper
-  for(s in 1:length(Species))
-  {
-    fn.fig(paste("spatial_inter_Skipper_n_shots",Species[s],sep="_"),2400,2400)
-    fn.1(species=Species[s],VAR='Skipper')
-    dev.off()
-  }
-  #VESSEL
-  for(s in 1:length(Species))
-  {
-    fn.fig(paste("spatial_inter_VESSEL_n_shots",Species[s],sep="_"),2400,2400)
-    fn.1(species=Species[s],VAR='VESSEL')
-    dev.off()
-  }
-  
-  
-  #effort as sum of effort
-  fn.effort.plot=function(DATA,species,VAR,numInt) 
-  {
-    id=match(species,names(Data))
-    a=Data[Data[,id]>0,]
-    vaR=sort(unique(Data[,match(VAR,names(Data))]))
-    CL=rgb(.1,.1,.2,alpha=0.2)
-    DATA$LAT=as.numeric(substr(DATA$SLAT,1,5))     #6 minute blocks
-    DATA$LONG=as.numeric(substr(DATA$SLONG,1,5))  
-    A=aggregate(hrs.trawld~DATA[,match(VAR,names(DATA))]+LONG+LAT,DATA,sum)
-    Ymax=max(A$hrs.trawld)
-    Ymin=min(A$hrs.trawld)
-    Breaks=c(0,seq(Ymin,Ymax,length.out=(numInt)))
-    b=range(DATA$SLAT)
-    ab=range(DATA$SLONG)
-    Colfunc <- colorRampPalette(c("yellow","red"))
-    Couleurs=c("white",Colfunc(numInt-1))
-    numberLab=10
-    colLeg=(rep(c("black",rep("transparent",numberLab-1)),(numInt+1)/numberLab))
-    smart.par(n.plots=length(vaR),MAR=c(2,2,1,1),OMA=c(1.75,2,.5,.1),MGP=c(1,.5,0))
-    for(y in 1:length(vaR))
+    
+    typo.UNLOAD.yr=fn.date.chck("UNLOAD.yr",year(Current.date))
+    typo.StartDate.yr=fn.date.chck("StartDate.yr",year(Current.date))
+    typo.EndDate.yr=fn.date.chck("EndDate.yr",year(Current.date))
+    
+    typo.UNLOAD.mn=fn.date.chck("UNLOAD.mn",12)
+    typo.StartDate.mn=fn.date.chck("StartDate.mn",12)
+    typo.EndDate.mn=fn.date.chck("EndDate.mn",12)
+    
+    typo.UNLOAD.dy=fn.date.chck("UNLOAD.dy",31)
+    typo.StartDate.dy=fn.date.chck("StartDate.dy",31)
+    typo.EndDate.dy=fn.date.chck("EndDate.dy",31)
+    
+    
+    fun1=function(What)
     {
-      AA=subset(A,A[,1]==vaR[y])
-      AA$LAT.cen=AA$LAT-.05
-      AA$LONG.cen=AA$LONG+.05 
-      AA=AA[order(AA$LAT.cen),]
-      lat=unique(AA$LAT.cen)
-      Reshaped=as.matrix(reshape(subset(AA,select=c(LONG.cen,LAT.cen,hrs.trawld)),idvar="LONG.cen",timevar="LAT.cen",v.names="hrs.trawld", direction="wide"))	
-      Reshaped=Reshaped[order(Reshaped[,1]),]
-      lon=Reshaped[,1]
-      Reshaped=Reshaped[,-1]	
-      image(lon,lat,z=Reshaped,xlab="",ylab="",col =Couleurs,breaks=Breaks,xlim=ab,ylim=b)
-      if(y==1)color.legend(quantile(ab,probs=.9),quantile(b,probs=.5),quantile(ab,probs=.975),quantile(b,probs=.05),
-                           paste(round(Breaks,0),"hrs"),rect.col=Couleurs,gradient="y",col=colLeg,cex=.7)
-      box()
-      aa=a[a[,match(VAR,names(a))]==vaR[y],]
-      with(aa,points(SLONG,SLAT,pch=21,col='white',bg='deepskyblue2',cex=1.5))   
-      legend('topleft',paste(vaR[y]," (",sum(aa[,id])," inter.)",sep=""),bty='n',cex=1.1,text.col="firebrick")
+      x=Data[,match(What,names(Data))]
+      RANG=range(x,na.rm=T)
+      QUANT=quantile(x,probs=seq(0,1,.01),na.rm=T)
+      plot(density(x,adjust = 2,na.rm=T),main=What,xlab="",yaxt='n',ylab="")
+      legend('top',paste(RANG,collapse="-"),bty='n')
+      n=length(QUANT)
+      text(QUANT[n-1],0,"    99%",col=2,srt=90,font=2,pos=3,cex=1.25)
+      text(QUANT[n],0,"    100%",col=2,srt=90,font=2,pos=3,cex=1.25)
     }
-    mtext("Longitude",1,outer=T)
-    mtext("Latitude",2,line=0.5,las=3,outer=T)
-    mtext(species,3,line=-1,outer=T)
-  }
-  #year
-  for(s in 1:length(Species))
-  {
-    fn.fig(paste("spatial_inter_year_sum_effort",Species[s],sep="_"),2400,2400)
-    fn.effort.plot(DATA=Data,species=Species[s],VAR='StartDate.yr',numInt=20)
-    dev.off()
-  }
-  #month
-  for(s in 1:length(Species))
-  {
-    fn.fig(paste("spatial_inter_month_sum_effort",Species[s],sep="_"),2400,2400)
-    fn.effort.plot(DATA=Data,species=Species[s],VAR='StartDate.mn',numInt=20)
-    dev.off()
-  }
-  #hour
-  for(s in 1:length(Species))
-  {
-    fn.fig(paste("spatial_inter_hour_sum_effort",Species[s],sep="_"),2400,2400)
-    fn.effort.plot(DATA=Data,species=Species[s],VAR='Start.hour',numInt=20)
-    dev.off()
-  }
-  
-  
-  
-  #barplots
-  fn.2=function(species,what)
-  {
-    id=match(species,names(Data))
-    if(what=="cpue")
+    # fn.fig("Exploratory/Preliminary/predictor_dist",1600,2400)
+    # par(mfcol=c(7,3),mai=c(.2,.2,.2,.1),oma=c(1,1.25,1,.1),las=1,mgp=c(1.5,.5,0))
+    # for(i in 1:length(varlist))fun1(What=varlist[i])
+    # mtext("Density",2,outer=T,las=3,line=-1,cex=1.75)
+    # dev.off()
+    
+    fun2=function(What)
     {
-      a=Data
-      TabYr=aggregate(a[,id]/a$hrs.trawld~StartDate.yr,a,mean)
-      TabMn=aggregate(a[,id]/a$hrs.trawld~StartDate.mn,a,mean)
-      TabHr=aggregate(a[,id]/a$hrs.trawld~Start.hour,a,mean)
-      Tabdpth=aggregate(a[,id]/a$hrs.trawld~SDEPTH,a,mean)
-    }else
+      x=Data[,match(What,names(Data))]
+      QUANT=quantile(x,probs=seq(0,1,.01),na.rm=T)
+      plot(x,main="",xlab="",ylab="")
+      mtext(What,2,las=3,line=2.35,cex=.8)
+      abline(h=QUANT[match("75%",names(QUANT))],col="green")
+      abline(h=QUANT[match("99%",names(QUANT))],col="orange")
+      abline(h=QUANT[match("100%",names(QUANT))],col="red")
+      
+    }
+    # fn.fig("predictor_dist2",1600,2400)
+    # par(mfcol=c(7,3),mai=c(.2,.4,.1,.1),oma=c(.1,1.25,.1,.1),las=1,mgp=c(1,.5,0))
+    # for(i in 1:length(varlist))fun2(What=varlist[i])
+    # dev.off()
+    
+    
+    #HOURS TRAWLED
+    fn.fig("Exploratory/Preliminary/Hours_tralwed",1600,2400)
+    par(mfcol=c(2,1),mai=c(.2,.2,.2,.1),oma=c(1,1.25,1,.1),las=1,mgp=c(1.5,.5,0))
+    fun1(What="hrs.trawld")
+    mtext("Density",2,las=3,line=1,cex=1.75)
+    
+    fun2(What="hrs.trawld")
+    dev.off()
+    
+    
+    #spatial distribution of species-gear interactions
+    #effort as number of shots
+    fn.1=function(species,VAR)
     {
+      id=match(species,names(Data))
       a=Data[Data[,id]>0,]
-      TabYr=aggregate(a[,id]~StartDate.yr,a,sum)
-      TabMn=aggregate(a[,id]~StartDate.mn,a,sum)
-      TabHr=aggregate(a[,id]~Start.hour,a,sum)
-      Tabdpth=aggregate(a[,id]~SDEPTH,a,sum)
+      XLIM=range(a$SLONG)
+      YLIM=range(a$SLAT)
+      vaR=sort(unique(Data[,match(VAR,names(Data))]))
+      #vaR=sort(unique(a[,match(VAR,names(a))]))
+      CL=rgb(.1,.1,.2,alpha=0.2)
+      smart.par(n.plots=length(vaR),MAR=c(2,2,1,1),OMA=c(1.75,2,.5,.1),MGP=c(1,.5,0))
+      for(y in 1:length(vaR))
+      {
+        #with(Data[Data[,match(VAR,names(Data))]==vaR[y],],smoothScatter(SLONG,SLAT, nrpoints = 0,ylab="",xlab="",ylim=YLIM,xlim=XLIM))  #number of shots
+        with(Data[Data[,match(VAR,names(Data))]==vaR[y],],plot(SLONG,SLAT,ylab="",xlab="",pch=21,col=CL,bg=CL,ylim=YLIM,xlim=XLIM))
+        aa=a[a[,match(VAR,names(a))]==vaR[y],]
+        if(nrow(aa)>0)with(aa,points(SLONG,SLAT,pch=21,col='white',bg='deepskyblue2',cex=1.5))   
+        #if(y==1)legend('topleft',c("shots","shots with interaction"),pch=21,col=c(CL,1),pt.bg=c(CL,'deepskyblue2'),bty='n',cex=0.9)
+        legend('bottomright',paste(vaR[y]," (",sum(aa[,id])," inter.)",sep=""),bty='n',cex=1.1,text.col="firebrick")
+      }
+      mtext("Longitude",1,outer=T)
+      mtext("Latitude",2,line=0.5,las=3,outer=T)
+      mtext(species,3,line=-1,outer=T)
     }
-    Efrt.yr=aggregate(hrs.trawld~StartDate.yr,Data,sum)
-    Efrt.yr=subset(Efrt.yr,StartDate.yr%in%sort(TabYr$StartDate.yr))
-    Efrt.Mn=aggregate(hrs.trawld~StartDate.mn,Data,sum)
-    Efrt.Mn=subset(Efrt.Mn,StartDate.mn%in%sort(TabMn$StartDate.mn))
-    Efrt.Hr=aggregate(hrs.trawld~Start.hour,Data,sum)
-    Efrt.Hr=subset(Efrt.Hr,Start.hour%in%sort(TabHr$Start.hour))
-    Efrt.dpth=aggregate(hrs.trawld~SDEPTH,Data,sum)
-    Efrt.dpth=subset(Efrt.dpth,SDEPTH%in%sort(Tabdpth$SDEPTH))
-    
-    
-    smart.par(n.plots=4,MAR=c(2.5,2,1.5,2),OMA=c(1.75,2,1,2),MGP=c(1.5,.5,0))
-    
-    plot(TabYr[,1],TabYr[,2],type='h',xlab='year',cex.lab=1.5,ylab='',ylim=c(0,max(TabYr[,2])))
-    par(new = T)
-    plot(Efrt.yr[,1],Efrt.yr[,2],type='l',lwd=2,col=2,axes=F, xlab=NA, ylab=NA,ylim=c(0,max(Efrt.yr[,2])))
-    axis(side = 4)
-    
-    plot(TabMn[,1],TabMn[,2],type='h',xlab='month',cex.lab=1.5,ylab='',ylim=c(0,max(TabMn[,2])))
-    par(new = T)
-    plot(Efrt.Mn[,1],Efrt.Mn[,2],type='l',lwd=2,col=2,axes=F, xlab=NA, ylab=NA,ylim=c(0,max(Efrt.Mn[,2])))
-    axis(side = 4)
-    
-    plot(TabHr[,1],TabHr[,2],type='h',xlab='hour',cex.lab=1.5,ylab='',ylim=c(0,max(TabHr[,2])))
-    par(new = T)
-    plot(Efrt.Hr[,1],Efrt.Hr[,2],type='l',lwd=2,col=2,axes=F, xlab=NA, ylab=NA,ylim=c(0,max(Efrt.Hr[,2])))
-    axis(side = 4)
-    
-    plot(Tabdpth[,1],Tabdpth[,2],type='h',xlab='depth',cex.lab=1.5,ylab='',xlim=c(50,120),ylim=c(0,max(Tabdpth[,2])))
-    par(new = T)
-    plot(Efrt.dpth[,1],Efrt.dpth[,2],type='l',lwd=2,col=2,axes=F, xlab=NA, ylab=NA,xlim=c(50,120),ylim=c(0,max(Efrt.dpth[,2])))
-    axis(side = 4)
-    
-    
-    mtext(side = 4, line = 0, 'Hours trawled',outer=T,las=3,col=2,cex=1.5)
-    mtext(species,3,line=-1,outer=T,cex=1.5)
-    if(what=="cpue")mtext("Number per hour trawled",2,line=0.5,las=3,outer=T,cex=1.5) else mtext("Interactions",2,line=0.5,las=3,outer=T,cex=1.5)
-  }
-  for(s in 1:length(Species))
-  {
-    fn.fig(paste("year_month_hour_",Species[s],sep="_"),2400,2400)
-    fn.2(species=Species[s],what='catch')
-    dev.off()
-  }
-  for(s in 1:length(Species))
-  {
-    fn.fig(paste("year_month_hour_cpue_",Species[s],sep="_"),2400,2400)
-    fn.2(species=Species[s],what='cpue')
-    dev.off()
-  }
-  
-  
-  #boxplot
-  fn.5=function(species,what)
-  {
-    id=match(species,names(Data))
-    iid=match("hrs.trawld",names(Data))
-    a=Data[Data[,id]>0,c(id,match(Predictors,names(Data)),iid)]
-    smart.par(n.plots=length(Predictors),MAR=c(1,1,1,1),OMA=c(2,2.5,.5,.1),MGP=c(2,.5,0))
-    for(p in 1:length(Predictors))
+    #year
+    for(s in 1:length(Species))
     {
-      d=a[,c(1,match(Predictors[p],names(a)),match("hrs.trawld",names(a)))]
-      if(!Predictors[p]%in%covars) d[,2]=factor(d[,2])
-      if(Predictors[p]%in%covars) d[,2]=cut(d[,2],10,include.lowest=F)
-      if(what=='cpue')boxplot(d[,1]/d$hrs.trawld~d[,2],xlab='',ylab="")else boxplot(d[,1]~d[,2],xlab='',ylab="")
-      mtext(Predictors[p],3,-1.5,cex=.8)
+      fn.fig(paste("Exploratory/Preliminary/spatial_inter_year_n_shots",Species[s],sep="_"),2400,2400)
+      fn.1(species=Species[s],VAR='StartDate.yr')
+      dev.off()
     }
-    if(what=='cpue')mtext(paste('Positive shots: number of',species,'caught/ hour'),2,outer=T,line=1,cex=1.25,las=3) else
-      mtext(paste('Positive shots: number of',species,'caught'),2,outer=T,line=1,cex=1.25,las=3)
-  }
-  for(s in 1:length(Species))
-  {
-    fn.fig(paste("boxplot_cpue",Species[s],sep="_"),2400,2400)
-    fn.5(species=Species[s],what='cpue')
-    dev.off()
-  }
-  for(s in 1:length(Species))
-  {
-    fn.fig(paste("boxplot_catch",Species[s],sep="_"),2400,2400)
-    fn.5(species=Species[s],what='catch')
-    dev.off()
-  }
-  
-  #plot total number by covariate
-  fn.5.1=function(species)
-  {
-    id=match(species,names(Data))
-    iid=match("hrs.trawld",names(Data))
-    a=Data[,c(id,match(Predictors,names(Data)),iid)]
-    smart.par(n.plots=length(Predictors),MAR=c(1,1,1,1),OMA=c(2,2.5,.5,.1),MGP=c(2,.5,0))
-    for(p in 1:length(Predictors))
+    #month
+    for(s in 1:length(Species))
     {
-      d=a[,c(1,match(Predictors[p],names(a)),match("hrs.trawld",names(a)))]
-      if(!Predictors[p]%in%covars) d[,2]=factor(d[,2])
-      if(Predictors[p]%in%covars) d[,2]=cut(d[,2],10,include.lowest=F)
-      d$Pos=ifelse(d[,1]>0,1,0)
-      x=aggregate(Pos~d[,2],d,sum)
-      plot(x[,1],x$Pos,xlab='',ylab="",col=2)
-      mtext(Predictors[p],3,-1.5,cex=.8)
+      fn.fig(paste("Exploratory/Preliminary/spatial_inter_month_n_shots",Species[s],sep="_"),2400,2400)
+      fn.1(species=Species[s],VAR='StartDate.mn')
+      dev.off()
     }
-    mtext(paste('Number of',species,'caught'),2,outer=T,line=1,cex=1.25,las=3)
-  }
-  for(s in 1:length(Species))
-  {
-    fn.fig(paste("catch_by_predictor",Species[s],sep="_"),2400,2400)
-    fn.5.1(species=Species[s])
-    dev.off()
-  }
-  
-  #catch target species
-  fn.3=function(species,VAR,VAR1)
-  {
-    id=match(species,names(Data))
-    a=Data[Data[,id]>0,]
-    XLIM=range(a$SLONG)
-    YLIM=range(a$SLAT)
-    vaR=sort(unique(a[,match(VAR,names(a))]))
-    CL=rgb(.1,.4,.1,alpha=0.2)
-    smart.par(n.plots=length(vaR),MAR=c(2,2,1,1),OMA=c(1.75,2,.5,.1),MGP=c(1,.5,0))
-    for(y in 1:length(vaR))
+    #hour
+    for(s in 1:length(Species))
     {
-      d=Data[Data[,match(VAR,names(Data))]==vaR[y],]
-      d=subset(d,hrs.trawld>0)
-      d$catch.rate=d[,match(VAR1,names(d))]/d$hrs.trawld
-      with(d,plot(SLONG,SLAT,ylab="",xlab="",pch=21,cex=3*(d$catch.rate/max(d$catch.rate,na.rm=T)),col=CL,bg=CL,ylim=YLIM,xlim=XLIM))
-      aa=a[a[,match(VAR,names(a))]==vaR[y],]
-      with(aa,points(SLONG,SLAT,pch=21,col='white',bg='deepskyblue2',cex=1.5))   
-      if(y==1)legend('topleft',c(paste(VAR1,"kg/hr"),"interaction"),pch=21,col=c(CL,1),pt.bg=c(CL,'deepskyblue2'),bty='n',cex=0.9)
-      legend('bottomright',paste(vaR[y]," (",sum(aa[,id])," inter.)",sep=""),bty='n',cex=1.1,text.col="firebrick")
+      fn.fig(paste("Exploratory/Preliminary/spatial_inter_hour_n_shots",Species[s],sep="_"),2400,2400)
+      fn.1(species=Species[s],VAR='Start.hour')
+      dev.off()
     }
-    mtext("Longitude",1,outer=T)
-    mtext("Latitude",2,line=0.5,las=3,outer=T)
-    mtext(species,3,line=-1,outer=T)
-  }
-  setwd(paste(getwd(),'Catch_target',sep='/'))
-  for(s in 1:length(Species)) for(v in 1:length(Ktch.vars))
-  {
-    fn.fig(paste("spatial",Species[s],'StartDate.yr',Ktch.vars[v],sep="_"),2400,2400)
-    fn.3(species=Species[s],VAR='StartDate.yr',VAR1=Ktch.vars[v])
-    dev.off()
-    
-    fn.fig(paste("spatial",Species[s],'StartDate.mn',Ktch.vars[v],sep="_"),2400,2400)
-    fn.3(species=Species[s],VAR='StartDate.mn',VAR1=Ktch.vars[v])
-    dev.off()
-    
-    fn.fig(paste("spatial",Species[s],'Start.hour',Ktch.vars[v],sep="_"),2400,2400)
-    fn.3(species=Species[s],VAR='Start.hour',VAR1=Ktch.vars[v])
-    dev.off()
-  }
-  
-  
-  fn.4=function(species,VAR,VAR2)
-  {
-    id=match(species,names(Data))
-    id2=match(VAR,names(Data))
-    a=Data[Data[,id]>0,]
-    if(!VAR2=='cpue')
+    #Skipper
+    # for(s in 1:length(Species))
+    # {
+    #   fn.fig(paste("spatial_inter_Skipper_n_shots",Species[s],sep="_"),2400,2400)
+    #   fn.1(species=Species[s],VAR='Skipper')
+    #   dev.off()
+    # }
+    #VESSEL
+    for(s in 1:length(Species))
     {
-      a$cpue=(a[,id2]/1000)    #tons 
-      hist(a$cpue,main="",xlab=paste(VAR,'tons'),cex.lab=1.5,col=3)
+      fn.fig(paste("Exploratory/Preliminary/spatial_inter_VESSEL_n_shots",Species[s],sep="_"),2400,2400)
+      fn.1(species=Species[s],VAR='VESSEL')
+      dev.off()
     }
-    if(VAR2=='cpue')
+    
+    
+    #effort as sum of effort
+    fn.effort.plot=function(DATA,species,VAR,numInt) 
     {
-      a$cpue=(a[,id2]/1000)/a$hrs.trawld    #tons per hour
-      hist(a$cpue,main="",xlab=paste(VAR,'tons/hr'),cex.lab=1.5,col=3)
+      id=match(species,names(Data))
+      a=Data[Data[,id]>0,]
+      vaR=sort(unique(Data[,match(VAR,names(Data))]))
+      CL=rgb(.1,.1,.2,alpha=0.2)
+      DATA$LAT=as.numeric(substr(DATA$SLAT,1,5))     #6 minute blocks
+      DATA$LONG=as.numeric(substr(DATA$SLONG,1,5))  
+      A=aggregate(hrs.trawld~DATA[,match(VAR,names(DATA))]+LONG+LAT,DATA,sum)
+      Ymax=max(A$hrs.trawld)
+      Ymin=min(A$hrs.trawld)
+      Breaks=c(0,seq(Ymin,Ymax,length.out=(numInt)))
+      b=range(DATA$SLAT)
+      ab=range(DATA$SLONG)
+      Colfunc <- colorRampPalette(c("yellow","red"))
+      Couleurs=c("white",Colfunc(numInt-1))
+      numberLab=10
+      colLeg=(rep(c("black",rep("transparent",numberLab-1)),(numInt+1)/numberLab))
+      smart.par(n.plots=length(vaR),MAR=c(2,2,1,1),OMA=c(1.75,2,.5,.1),MGP=c(1,.5,0))
+      for(y in 1:length(vaR))
+      {
+        AA=subset(A,A[,1]==vaR[y])
+        AA$LAT.cen=AA$LAT-.05
+        AA$LONG.cen=AA$LONG+.05 
+        AA=AA[order(AA$LAT.cen),]
+        lat=unique(AA$LAT.cen)
+        Reshaped=as.matrix(reshape(subset(AA,select=c(LONG.cen,LAT.cen,hrs.trawld)),idvar="LONG.cen",timevar="LAT.cen",v.names="hrs.trawld", direction="wide"))	
+        Reshaped=Reshaped[order(Reshaped[,1]),]
+        lon=Reshaped[,1]
+        Reshaped=Reshaped[,-1]	
+        image(lon,lat,z=Reshaped,xlab="",ylab="",col =Couleurs,breaks=Breaks,xlim=ab,ylim=b)
+        if(y==1)color.legend(quantile(ab,probs=.9),quantile(b,probs=.5),quantile(ab,probs=.975),quantile(b,probs=.05),
+                             paste(round(Breaks,0),"hrs"),rect.col=Couleurs,gradient="y",col=colLeg,cex=.7)
+        box()
+        aa=a[a[,match(VAR,names(a))]==vaR[y],]
+        with(aa,points(SLONG,SLAT,pch=21,col='white',bg='deepskyblue2',cex=1.5))   
+        legend('topleft',paste(vaR[y]," (",sum(aa[,id])," inter.)",sep=""),bty='n',cex=1.1,text.col="firebrick")
+      }
+      mtext("Longitude",1,outer=T)
+      mtext("Latitude",2,line=0.5,las=3,outer=T)
+      mtext(species,3,line=-1,outer=T)
+    }
+    #year
+    for(s in 1:length(Species))
+    {
+      fn.fig(paste("Exploratory/Preliminary/spatial_inter_year_sum_effort",Species[s],sep="_"),2400,2400)
+      fn.effort.plot(DATA=Data,species=Species[s],VAR='StartDate.yr',numInt=20)
+      dev.off()
+    }
+    #month
+    for(s in 1:length(Species))
+    {
+      fn.fig(paste("Exploratory/Preliminary/spatial_inter_month_sum_effort",Species[s],sep="_"),2400,2400)
+      fn.effort.plot(DATA=Data,species=Species[s],VAR='StartDate.mn',numInt=20)
+      dev.off()
+    }
+    #hour
+    for(s in 1:length(Species))
+    {
+      fn.fig(paste("Exploratory/Preliminary/spatial_inter_hour_sum_effort",Species[s],sep="_"),2400,2400)
+      fn.effort.plot(DATA=Data,species=Species[s],VAR='Start.hour',numInt=20)
+      dev.off()
     }
     
-    box()
-  }
-  for(s in 1:length(Species))
-  {
-    fn.fig(paste("interactions_by_cpue",Species[s],sep="_"),2400,2400)
-    smart.par(n.plots=length(Ktch.vars),MAR=c(3.5,3.5,1,1),OMA=c(1.75,2,.5,.1),MGP=c(2,.5,0))
-    for(v in 1:length(Ktch.vars)) fn.4(species=Species[s],VAR=Ktch.vars[v],VAR2='cpue') 
-    dev.off()
     
-    fn.fig(paste("interactions_by_catch",Species[s],sep="_"),2400,2400)
-    smart.par(n.plots=length(Ktch.vars),MAR=c(3.5,3.5,1,1),OMA=c(1.75,2,.5,.1),MGP=c(2,.5,0))
-    for(v in 1:length(Ktch.vars)) fn.4(species=Species[s],VAR=Ktch.vars[v],VAR2='catch') 
-    dev.off()
+    
+    #barplots
+    fn.2=function(species,what)
+    {
+      id=match(species,names(Data))
+      if(what=="cpue")
+      {
+        a=Data
+        TabYr=aggregate(a[,id]/a$hrs.trawld~StartDate.yr,a,mean)
+        TabMn=aggregate(a[,id]/a$hrs.trawld~StartDate.mn,a,mean)
+        TabHr=aggregate(a[,id]/a$hrs.trawld~Start.hour,a,mean)
+        Tabdpth=aggregate(a[,id]/a$hrs.trawld~SDEPTH,a,mean)
+      }else
+      {
+        a=Data[Data[,id]>0,]
+        TabYr=aggregate(a[,id]~StartDate.yr,a,sum)
+        TabMn=aggregate(a[,id]~StartDate.mn,a,sum)
+        TabHr=aggregate(a[,id]~Start.hour,a,sum)
+        Tabdpth=aggregate(a[,id]~SDEPTH,a,sum)
+      }
+      Efrt.yr=aggregate(hrs.trawld~StartDate.yr,Data,sum)
+      Efrt.yr=subset(Efrt.yr,StartDate.yr%in%sort(TabYr$StartDate.yr))
+      Efrt.Mn=aggregate(hrs.trawld~StartDate.mn,Data,sum)
+      Efrt.Mn=subset(Efrt.Mn,StartDate.mn%in%sort(TabMn$StartDate.mn))
+      Efrt.Hr=aggregate(hrs.trawld~Start.hour,Data,sum)
+      Efrt.Hr=subset(Efrt.Hr,Start.hour%in%sort(TabHr$Start.hour))
+      Efrt.dpth=aggregate(hrs.trawld~SDEPTH,Data,sum)
+      Efrt.dpth=subset(Efrt.dpth,SDEPTH%in%sort(Tabdpth$SDEPTH))
+      
+      
+      smart.par(n.plots=4,MAR=c(2.5,2,1.5,2),OMA=c(1.75,2,1,2),MGP=c(1.5,.5,0))
+      
+      plot(TabYr[,1],TabYr[,2],type='h',xlab='year',cex.lab=1.5,ylab='',ylim=c(0,max(TabYr[,2])))
+      par(new = T)
+      plot(Efrt.yr[,1],Efrt.yr[,2],type='l',lwd=2,col=2,axes=F, xlab=NA, ylab=NA,ylim=c(0,max(Efrt.yr[,2])))
+      axis(side = 4)
+      
+      plot(TabMn[,1],TabMn[,2],type='h',xlab='month',cex.lab=1.5,ylab='',ylim=c(0,max(TabMn[,2])))
+      par(new = T)
+      plot(Efrt.Mn[,1],Efrt.Mn[,2],type='l',lwd=2,col=2,axes=F, xlab=NA, ylab=NA,ylim=c(0,max(Efrt.Mn[,2])))
+      axis(side = 4)
+      
+      plot(TabHr[,1],TabHr[,2],type='h',xlab='hour',cex.lab=1.5,ylab='',ylim=c(0,max(TabHr[,2])))
+      par(new = T)
+      plot(Efrt.Hr[,1],Efrt.Hr[,2],type='l',lwd=2,col=2,axes=F, xlab=NA, ylab=NA,ylim=c(0,max(Efrt.Hr[,2])))
+      axis(side = 4)
+      
+      plot(Tabdpth[,1],Tabdpth[,2],type='h',xlab='depth',cex.lab=1.5,ylab='',xlim=c(50,120),ylim=c(0,max(Tabdpth[,2])))
+      par(new = T)
+      plot(Efrt.dpth[,1],Efrt.dpth[,2],type='l',lwd=2,col=2,axes=F, xlab=NA, ylab=NA,xlim=c(50,120),ylim=c(0,max(Efrt.dpth[,2])))
+      axis(side = 4)
+      
+      
+      mtext(side = 4, line = 0, 'Hours trawled',outer=T,las=3,col=2,cex=1.5)
+      mtext(species,3,line=-1,outer=T,cex=1.5)
+      if(what=="cpue")mtext("Number per hour trawled",2,line=0.5,las=3,outer=T,cex=1.5) else mtext("Interactions",2,line=0.5,las=3,outer=T,cex=1.5)
+    }
+    for(s in 1:length(Species))
+    {
+      fn.fig(paste("Exploratory/Preliminary/year_month_hour_",Species[s],sep="_"),2400,2400)
+      fn.2(species=Species[s],what='catch')
+      dev.off()
+    }
+    for(s in 1:length(Species))
+    {
+      fn.fig(paste("Exploratory/Preliminary/year_month_hour_cpue_",Species[s],sep="_"),2400,2400)
+      fn.2(species=Species[s],what='cpue')
+      dev.off()
+    }
+    
+    
+    #plot total number by covariate   
+    fn.5.1=function(species)
+    {
+      id=match(species,names(Data))
+      iid=match("hrs.trawld",names(Data))
+      a=Data[,c(id,match(Predictors,names(Data)),iid)]
+      smart.par(n.plots=length(Predictors),MAR=c(1,1,1,1),OMA=c(2,2.5,.5,.1),MGP=c(2,.5,0))
+      for(p in 1:length(Predictors))
+      {
+        d=a[,c(1,match(Predictors[p],names(a)),match("hrs.trawld",names(a)))]
+        if(!Predictors[p]%in%covars) d[,2]=factor(d[,2])
+        if(Predictors[p]%in%covars) d[,2]=cut(d[,2],10,include.lowest=F)
+        d$Pos=ifelse(d[,1]>0,1,0)
+        x=aggregate(Pos~d[,2],d,sum)
+        plot(x[,1],x$Pos,xlab='',ylab="",col=2)
+        mtext(Predictors[p],3,-1.5,cex=.8)
+      }
+      mtext(paste('Number of',species,'caught'),2,outer=T,line=1,cex=1.25,las=3)
+    }
+    for(s in 1:length(Species))
+    {
+      fn.fig(paste("Exploratory/Preliminary/catch_by_predictor",Species[s],sep="_"),2400,2400)
+      fn.5.1(species=Species[s])
+      dev.off()
+    }
+    
+    #catch target species
+    fn.3=function(species,VAR,VAR1)
+    {
+      id=match(species,names(Data))
+      a=Data[Data[,id]>0,]
+      XLIM=range(a$SLONG)
+      YLIM=range(a$SLAT)
+      vaR=sort(unique(a[,match(VAR,names(a))]))
+      CL=rgb(.1,.4,.1,alpha=0.2)
+      smart.par(n.plots=length(vaR),MAR=c(2,2,1,1),OMA=c(1.75,2,.5,.1),MGP=c(1,.5,0))
+      for(y in 1:length(vaR))
+      {
+        d=Data[Data[,match(VAR,names(Data))]==vaR[y],]
+        d=subset(d,hrs.trawld>0)
+        d$catch.rate=d[,match(VAR1,names(d))]/d$hrs.trawld
+        with(d,plot(SLONG,SLAT,ylab="",xlab="",pch=21,cex=3*(d$catch.rate/max(d$catch.rate,na.rm=T)),col=CL,bg=CL,ylim=YLIM,xlim=XLIM))
+        aa=a[a[,match(VAR,names(a))]==vaR[y],]
+        with(aa,points(SLONG,SLAT,pch=21,col='white',bg='deepskyblue2',cex=1.5))   
+        if(y==1)legend('topleft',c(paste(VAR1,"kg/hr"),"interaction"),pch=21,col=c(CL,1),pt.bg=c(CL,'deepskyblue2'),bty='n',cex=0.9)
+        legend('bottomright',paste(vaR[y]," (",sum(aa[,id])," inter.)",sep=""),bty='n',cex=1.1,text.col="firebrick")
+      }
+      mtext("Longitude",1,outer=T)
+      mtext("Latitude",2,line=0.5,las=3,outer=T)
+      mtext(species,3,line=-1,outer=T)
+    }
+    setwd(paste(getwd(),'Exploratory/Preliminary/Catch_target',sep='/'))
+    for(s in 1:length(Species)) for(v in 1:length(Ktch.vars))
+    {
+      fn.fig(paste("spatial",Species[s],'StartDate.yr',Ktch.vars[v],sep="_"),2400,2400)
+      fn.3(species=Species[s],VAR='StartDate.yr',VAR1=Ktch.vars[v])
+      dev.off()
+      
+      fn.fig(paste("spatial",Species[s],'StartDate.mn',Ktch.vars[v],sep="_"),2400,2400)
+      fn.3(species=Species[s],VAR='StartDate.mn',VAR1=Ktch.vars[v])
+      dev.off()
+      
+      fn.fig(paste("spatial",Species[s],'Start.hour',Ktch.vars[v],sep="_"),2400,2400)
+      fn.3(species=Species[s],VAR='Start.hour',VAR1=Ktch.vars[v])
+      dev.off()
+    }
+    
+    
+    fn.4=function(species,VAR,VAR2)
+    {
+      id=match(species,names(Data))
+      id2=match(VAR,names(Data))
+      a=Data[Data[,id]>0,]
+      if(!VAR2=='cpue')
+      {
+        a$cpue=(a[,id2]/1000)    #tons 
+        hist(a$cpue,main="",xlab=paste(VAR,'tons'),cex.lab=1.5,col=3)
+      }
+      if(VAR2=='cpue')
+      {
+        a$cpue=(a[,id2]/1000)/a$hrs.trawld    #tons per hour
+        hist(a$cpue,main="",xlab=paste(VAR,'tons/hr'),cex.lab=1.5,col=3)
+      }
+      
+      box()
+    }
+    for(s in 1:length(Species))
+    {
+      fn.fig(paste("interactions_by_cpue",Species[s],sep="_"),2400,2400)
+      smart.par(n.plots=length(Ktch.vars),MAR=c(3.5,3.5,1,1),OMA=c(1.75,2,.5,.1),MGP=c(2,.5,0))
+      for(v in 1:length(Ktch.vars)) fn.4(species=Species[s],VAR=Ktch.vars[v],VAR2='cpue') 
+      dev.off()
+      
+      fn.fig(paste("interactions_by_catch",Species[s],sep="_"),2400,2400)
+      smart.par(n.plots=length(Ktch.vars),MAR=c(3.5,3.5,1,1),OMA=c(1.75,2,.5,.1),MGP=c(2,.5,0))
+      for(v in 1:length(Ktch.vars)) fn.4(species=Species[s],VAR=Ktch.vars[v],VAR2='catch') 
+      dev.off()
+      
+    }
     
   }
-  
+   
 }
 
+# Final data manipulation-------------------------------------------------------------------------
 #Look at temperature
 Temp=read.csv("C:/Matias/Data/Oceanography/SST.csv")
 Temp=subset(Temp,Lat>(-21) & Lat<(-17) &Long<121 & Long>114)
@@ -559,12 +703,10 @@ Data$Season=with(Data,ifelse(StartDate.mn%in%3:8,"AuWin","SprSu")) #aggregation 
 #Remove unvalidated records for unknown vessel
 Data=subset(Data,!VESSEL=="")
 
-#2. Data analyses
-setwd(WD)
 
-#Calculate annual catch rates
-    ## Arithmetic Mean CPUE
-Effort.scaler=1000  #in hours
+# Arithmetic Mean CPUE-------------------------------------------------------------------------
+setwd(WD)
+Effort.scaler=1000  #in hours  
 fn.cpue=function(d,var)
 {
   out = d %>%
@@ -579,19 +721,22 @@ fn.cpue=function(d,var)
     as.data.frame
   return(out)
 }
-Narrow.cpue=fn.cpue(d=Data%>%select(StartDate.yr,hrs.trawld,SawfishNarrow,SawfishGreen),var="SawfishNarrow")
-Green.cpue=fn.cpue(d=Data%>%select(StartDate.yr,hrs.trawld,SawfishNarrow,SawfishGreen),var="SawfishGreen")
+Narrow.cpue=fn.cpue(d=Data%>%select(StartDate.yr,hrs.trawld,SawfishNarrow,SawfishGreen),
+                    var="SawfishNarrow")
+Green.cpue=fn.cpue(d=Data%>%select(StartDate.yr,hrs.trawld,SawfishNarrow,SawfishGreen),
+                   var="SawfishGreen")
 
-fn.fig("Annual cpue",2400,2400)
-plot(Narrow.cpue$year,Narrow.cpue$mean,ylab=paste('Numbers caught per',Effort.scaler,'trawled hour',sep=" "),xlab="Year",
-     ylim=c(0,max(c(Narrow.cpue$uppCL,Green.cpue$uppCL))),pch=19,cex=1.5)
+fn.fig("Annual nominal cpue",2400,2400)
+plot(Narrow.cpue$year,Narrow.cpue$mean,ylab=paste('Numbers caught per',Effort.scaler,'trawled hour (95% CI)',sep=" "),
+     xlab="Year",ylim=c(0,max(c(Narrow.cpue$uppCL,Green.cpue$uppCL))),pch=19,cex=1.5)
 with(Narrow.cpue,segments(year,lowCL,year,uppCL,lwd=2))
 points(Green.cpue$year+.2,Green.cpue$mean,cex=1.5,pch=19,col="grey60")
 with(Green.cpue,segments(year+.2,lowCL,year+.2,uppCL,lwd=2,col="grey60"))
+legend("topleft",c("Narrow","Green"),pch=19,col=c("black","grey60"),bty='n',cex=1.25)
 dev.off()
 
 
-#Correlations among predictors
+# Correlations among predictors-------------------------------------------------------------------------
 Chck.Corr="NO"
 if(Chck.Corr=="YES")
 {
@@ -611,22 +756,44 @@ if(Chck.Corr=="YES")
 
 
 
-#MODEL              
-#always check there's no unique predictor levels
-#dropped LAT due to strong correlation with LONG and DEPTH
-
-TERMS=c("Season",'hrs.trawld',"VESSEL","Day_night","long","depth","TotalCatch")
+# Modelled Mean CPUE-------------------------------------------------------------------------
+    
+#note: always check there's no unique predictor levels
+#      dropped LAT due to strong correlation with LONG and DEPTH
 # rules of thumb: to avoid over-fitting for LR models, have at least 10 "events" per 
-#       covariate degree of freedom. Hence, only selected these terms (based on "catch_by_species" plot)
+#       covariate degree of freedom. Hence, I only selected these terms (based on "catch_by_species" plot)
 #       A continuous covariate would be 1 df, an N-level factor would be N-1 df. 
 # Cross-validation can detect overfit models by determining how well your model generalizes 
 #       to other data sets by partitioning your data. If the model does a poor job at predicting 
 #       the removed observations, this indicates that the model is probably tailored to the specific
 #       data points that are included in the sample and not generalizable outside the sample.
 
+FACTORS=c("StartDate.yr","Season","VESSEL","Day_night")
+COVS= c("hrs.trawld","long","depth","StartDate.mn","Start.hour") 
+TERMS=c(FACTORS,COVS)
+ 
+Data=Data%>%
+  mutate(VESSEL=tolower(VESSEL),
+         VESSEL=ifelse(VESSEL=="torbay ii","torbay",VESSEL))
 
-COVS=c(covars,'Ann.eff','hrs.trawld')
-
+fn.chk.lvls=function(var)
+{
+  d=Data%>%
+    mutate(Ktch=get(var))%>%
+    filter(Ktch>0)%>%
+    dplyr::select(all_of(TERMS),Ktch)
+  
+  #convert to factors
+  d[FACTORS] <- lapply(d[FACTORS], factor)
+  
+  #tabulate interactions by factor level
+  TABS=vector('list',length(FACTORS))
+  names(TABS)=FACTORS
+  for(f in 1:length(FACTORS)) TABS[[f]]=d%>%group_by(get(FACTORS[f]))%>%summarise(N=sum(Ktch))
+  return(TABS)
+}
+Catch.by.factor.level.SawfishNarrow=fn.chk.lvls(var="SawfishNarrow")
+Catch.by.factor.level.SawfishGreen=fn.chk.lvls(var="SawfishGreen")
 
 #Impute missing values of depth
 Data$MissingDepth <- ifelse(is.na(Data$depth),"Y", "N")  #to allow tracking what records were imputed
@@ -641,15 +808,12 @@ Data$depth=round(Data$depth)
 
 
 
+#Get data used in models
+Model.d=Data[,c(Species,TERMS)]%>%
+  filter(hrs.trawld<=trawl.hour_max)
 
 #normalise covariates so influence on same scale
-Model.d=Data[,c(Species,TERMS)]
-
-#remove VESSEL=="Australia Bay I" as only started fishing in 2017
-Model.d=subset(Model.d,!VESSEL=="Australia Bay I")
-
-numerics=TERMS[which(TERMS%in%COVS)]
-
+numerics=COVS
 fn.scale=function(D,Numeric)
 {
   procValues=preProcess(D[,Numeric],method=c('center','scale')) 
@@ -658,10 +822,30 @@ fn.scale=function(D,Numeric)
 }
 Model.d.scaled=fn.scale(D=Model.d,Numeric=numerics)
 
+#Percentage of trawls with sawfish
+Percent.trawl.with.sawfish=Data%>%
+  mutate(Tot=SawfishGreen+SawfishNarrow,
+         Tot=ifelse(Tot>0,1,Tot))%>%
+  group_by(Tot)%>%tally()
+n.zero=Percent.trawl.with.sawfish%>%filter(Tot==0)%>%pull(n)
+n.non.zero=sum(Percent.trawl.with.sawfish%>%filter(!Tot==0)%>%pull(n))
+Percent.trawl.with.sawfish=round(100*n.non.zero/(n.non.zero+n.zero),3)
+
+#Percentage of number of individuals per interaction event
+Percent.trawl.with.greensawfish=Data%>%
+            filter(SawfishGreen>0)%>%
+            group_by(SawfishGreen)%>%
+            tally()%>%
+            mutate(Percent=round(100*n/sum(n),2))
+Percent.trawl.with.narrowsawfish=Data%>%
+            filter(SawfishNarrow>0)%>%
+            group_by(SawfishNarrow)%>%
+            tally()%>%
+            mutate(Percent=round(100*n/sum(n),2))
+
 
 
 #1. Define how to use effort in model
-do.effort.cut="NO"
 if(do.effort.cut=="YES")
 {
   fn.effort.levels=function(species)
@@ -766,13 +950,14 @@ if(do.effort.cut=="YES")
   # x=Bin.mid*Ag.eff$dummy
   # plot(x,y)
 }
+Model.d$Eff.bin=factor(with(Model.d,
+                            ifelse(hrs.trawld<2,"Short",
+                            ifelse(hrs.trawld>=2 & hrs.trawld<4,"Standard",
+                                   "Long"))))
+
 
 
 #2. Apply binomial and boosted regresssion trees
-#TERMS=c(TERMS[-match("hrs.trawld",TERMS)],"Eff.bin")
-
-Model.d$Eff.bin=factor(with(Model.d,ifelse(hrs.trawld<2,"Short",
-                ifelse(hrs.trawld>=2 & hrs.trawld<4,"Standard","Long"))))
 
 
 #Check if factors more than 32 levels (Random Forest won't work)
@@ -780,13 +965,12 @@ too.many.levels <- function(x)  is.factor(x) == TRUE & length(levels(x)) > 32
 delete <- lapply(Model.d, too.many.levels)
 
 
-#run models
+#Run models
 #notes: 
 #1. apply SMOTE for oversampling rare events (i.e. imbalanced data)  see http://amunategui.github.io/smote/
-#smote() uses bootstrapping and k-n nearest neighbour to synthetically create more 
-# observations of the rare event
-# Synthetic minority sampling technique (SMOTE): down samples the majority class and synthesizes 
-# new minority instances by interpolating between existing one
+#     Synthetic minority sampling technique (SMOTE) uses bootstrapping and k-n nearest neighbour  
+#     to synthetically create more observations of the rare event. It down samples the majority 
+#     class and synthesizes new minority instances by interpolating between existing one
 
 #2. AUC is best way to understand outcomes of rare event modelling (more powerful than accuracy 
 # because if the model predicts correctly all the 0s, i.e. high accuracy, I don't care, I need
@@ -799,28 +983,35 @@ CORES=detectCores()-1
 cat(CORES, " cores detected.")
 
 
-#Fit models
+#Fit models     #takes 18 sec
 Model.out=vector('list',length(Species))
 names(Model.out)=Species
 Best.MDL=FinalModel=Model.out
+FORMULA=formula(Occurrence~StartDate.yr + Season + VESSEL + Day_night  + 
+                  long + depth + offset(hrs.trawld))
+#FORMULA=formula(Occurrence~.)
 
-fn.models=function(species,METRIC)
+fn.models=function(species,METRIC,Formula,scaled.d)
 {
-  #select if doing analyses on normalised data or not
-  d=Model.d[,c(species,TERMS)]
+  #select if doing analyses on scaled data 
+  if(scaled.d=="NO")  d=Model.d[,c(species,TERMS)]
+  if(scaled.d=="YES") d=Model.d.scaled[,c(species,TERMS)]
   
   #remove noise
-  id=d[d[,match(species,names(d))]>0,]
-  d=subset(d,hrs.trawld<=max(id$hrs.trawld)) 
+  #id=d[d[,match(species,names(d))]>0,]
+  #d=subset(d,hrs.trawld<=max(id$hrs.trawld)) 
   
-  #set character variables to factors   
-  idd=which(!names(d)%in%c(COVS,species))
-  for(f in 1:length(idd)) d[,idd[f]]=as.factor(d[,idd[f]])
-  d$Occurrence=d[,species]
-  d=d[,-match(species,names(d))]
-  d$Occurrence=ifelse(d$Occurrence>0,1,0)
-  d$Occurrence=factor(ifelse(d$Occurrence==1,"yes","no"),levels=c("yes","no"))    #have presence as first levels
+  #set character variables to factors
+  d[FACTORS] <- lapply(d[FACTORS], factor)
   
+  #Define presence/absence response variable
+  d=d%>%
+    mutate(Occurrence=get(species),
+           Occurrence=ifelse(Occurrence>0,1,0),
+           Occurrence=factor(ifelse(Occurrence==1,"yes","no"),
+                             levels=c("yes","no")))%>% #have presence as first levels
+    dplyr::select(-all_of(species))
+
   
   #weight   
   # d$hrs.trawld.bin=cut(d$hrs.trawld,breaks=seq(0,round(max(d$hrs.trawld)),.5))#30 min bins (the way the fishers operate)
@@ -843,23 +1034,19 @@ fn.models=function(species,METRIC)
   
   #Fit models
   
-  #Formula=formula(paste("Occurrence",paste(TERMS,collapse="+"),sep="~"))
-  
   #Binomial
-  BIN=glm(Occurrence~.,data =train, family="binomial", maxit=500)
+  BIN=glm(Formula,data =train, family="binomial", maxit=500)
   
   #Binomial to smote data
-  BIN.smote=glm(Occurrence~.,data =train.smote, family="binomial", maxit=500)
+  BIN.smote=glm(Formula,data =train.smote, family="binomial", maxit=500)
   
   #Binomial brglm
-  Brglm <- brglm(Occurrence~., data = train)
-  
+  Brglm <- brglm(Formula, data = train)
   
   #GBM
   #register cluster to train in parallel (only works for Xgboost)
   cl <-makeCluster(CORES, type = "SOCK") 
   registerDoSNOW(cl)
-  
   #Control
   ctrl <- trainControl(method = "repeatedcv",
                        number = 10,     #split data in ten ways to build 10 models
@@ -867,11 +1054,20 @@ fn.models=function(species,METRIC)
                        classProbs = TRUE,     #needed to score models using AUC
                        summaryFunction = twoClassSummary,
                        search = "grid")     #find optimal collection of parameters using default grid
-  
   #gbm
-  fit.gbm <- train(Occurrence~.,data=train, method='gbm', metric = METRIC,trControl=ctrl)
+  fit.gbm <- train(Formula,
+                   data=train, 
+                   method='gbm', 
+                   metric = METRIC,
+                   trControl=ctrl,
+                   na.action=na.exclude)
   #gbm smote
-  fit.gbm.smote <- train(Occurrence~.,data=train.smote, method='gbm', metric = METRIC,trControl=ctrl)
+  fit.gbm.smote <- train(Formula,
+                         data=train.smote,
+                         method='gbm',
+                         metric = METRIC,
+                         trControl=ctrl,
+                         na.action=na.exclude)
   
 
   #clear parameters for parallel computation
@@ -883,8 +1079,11 @@ fn.models=function(species,METRIC)
   return(list(DATA=d,train=train,test=test,BIN=BIN,BIN.smote=BIN.smote,
               Brglm=Brglm,GBM=fit.gbm,GBM.smote=fit.gbm.smote))
 }
-system.time({for(s in 1:length(Species))Model.out[[s]]=fn.models(species=Species[s],METRIC="Sens")})
-
+system.time({for(s in 1:length(Species))Model.out[[s]]=fn.models(species=Species[s],
+                                                                 METRIC="Sens",
+                                                                 Formula=FORMULA,
+                                                                 scaled.d="NO")})
+#ACA
 #fit selected model
 final.mod=function(d,MOD)
 {
@@ -1005,7 +1204,7 @@ polygon(x=c(116,116,120,120),y=c(-18,-21,-21,-18),lwd=1.5,col="grey65")
 dev.off()
 
 
-#Figure 2 Barplot of interactions
+#Figure 2 Barplot of interactions   #ACA
 fn.2=function(species,what)
 {
   id=match(species,names(Data))
@@ -1103,7 +1302,7 @@ SawfishNarrowDEAD=sum(Data$SawfishNarrowDEAD)
 Tot.records=nrow(Data)
 Tot.effort=sum(Data$hrs.trawld)
 Tab1=data.frame(GreenALIVE=SawfishGreenALIVE,GreenDEAD=SawfishGreenDEAD,
-                NarrowALIVE=SawfishNarrowALIVE,hNarrowDEAD=SawfishNarrowDEAD,
+                NarrowALIVE=SawfishNarrowALIVE,NarrowDEAD=SawfishNarrowDEAD,
                 Tot.records=Tot.records,Tot.effort=Tot.effort)
 write.csv(Tab1,"Tab1.csv")
 
