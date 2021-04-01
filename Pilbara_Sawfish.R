@@ -25,6 +25,7 @@ library(brglm)  #biased corrected glm
 library(dplyr)
 #any(grepl("rpart", installed.packages()))  #check if rpart is installed
 library("readxl")
+library("plotrix")
 
 source("C:/Matias/Analyses/SOURCE_SCRIPTS/Git_Population.dynamics/fn.fig.R")
 Do.tiff="NO"    #select figure extension
@@ -95,6 +96,7 @@ smart.par=function(n.plots,MAR,OMA,MGP) return(par(mfrow=n2mfrow(n.plots),mar=MA
 WD=getwd()
 
 Species=c("SawfishNarrow","SawfishGreen")
+names(Species)=c("Narrow sawfish","Green sawfish")
 Ktch.vars=c("TotalCatch","TotalDiscard","TotalBEEmp","TotalBSSnapper","TotalThreadfin",      
             "TotalRedEmp","TotalRankinCod","TotalFrypan","TotalSaddletail",     
             "TotalSpangledEmp","TotalCrimSnapper","TotalGoldband")
@@ -983,7 +985,7 @@ CORES=detectCores()-1
 cat(CORES, " cores detected.")
 
 
-#Fit models     #takes 18 sec
+#Fit models     #takes 18 sec   ACA
 Model.out=vector('list',length(Species))
 names(Model.out)=Species
 Best.MDL=FinalModel=Model.out
@@ -1083,13 +1085,68 @@ system.time({for(s in 1:length(Species))Model.out[[s]]=fn.models(species=Species
                                                                  METRIC="Sens",
                                                                  Formula=FORMULA,
                                                                  scaled.d="NO")})
-#ACA
-#fit selected model
-final.mod=function(d,MOD)
+setwd(paste(WD,"paper",sep="/"))
+
+
+#Determine best model
+ #-- AUC
+smart.par=function(n.plots,MAR,OMA,MGP) return(par(mfrow=n2mfrow(n.plots),mar=MAR,oma=OMA,las=1,mgp=MGP))
+fun.pred.auc=function(moDl,NMS,test)
+{
+  #pred probability
+  if(class(moDl)[1]=="train"){pred.prob=predict(moDl,test,type='prob',n.trees=moDl$bestTune$n.trees)}else
+  {
+    pred.prob=predict(moDl,test,'response')
+    pred.prob=data.frame(no=pred.prob)
+    pred.prob$yes=1-pred.prob$no
+  }
+  #auc
+  auc=roc(test$Occurrence, pred.prob[,match('yes',names(pred.prob))])  #.5 is random model; 1 is perfect model
+  Preds=cbind(pred.prob)
+  names(Preds)=paste(NMS,names(Preds),sep="_")
+  return(list(Preds=Preds,auc=auc))
+}
+best.mdl=function(modl)
+{
+  Fits=names(modl)[-match(c("test","train","DATA"),names(modl))]
+  AUCs=vector('list',length(Fits))
+  names(AUCs)=Fits
+  for(f in 1:length(Fits))
+  {
+    AUCs[[f]]=fun.pred.auc(moDl=modl[[match(Fits[f],names(modl))]],NMS=Fits[f],test=modl[[match('test',names(modl))]])   
+  }
+  
+  return(list(AUC=AUCs))
+}
+for(s in 1:length(Species))Best.MDL[[s]]=best.mdl(modl=Model.out[[s]])
+
+fn.fig("S3_AUC",1600,2400)
+smart.par(n.plots=length(Species),MAR=c(4,1,1,1),OMA=rep(1,4),MGP=c(2.5,.7,0))
+for(s in 1:length(Species))
+{
+  plot(Best.MDL[[s]]$AUC[[1]]$auc)
+  aucs=rep(NA,length(Best.MDL[[s]]$AUC))
+  aucs[1]=Best.MDL[[s]]$AUC[[1]]$auc$auc[1]
+  CL=2:length(Best.MDL[[s]]$AUC)
+  for(l in CL)
+  {
+    lines(Best.MDL[[s]]$AUC[[l]]$auc,col=CL[l-1])
+    aucs[l]=Best.MDL[[s]]$AUC[[l]]$auc$auc[1]
+  }
+  nombres=names(Best.MDL[[s]]$AUC)  
+  #nombres=read.table(text = nombres, sep = ".", as.is = TRUE)$V2
+  legend('bottomright',paste(nombres,round(aucs,3)),lty=1,col=c(1,CL),bty='n',title="AUC",cex=1)
+  legend("topleft",names(Species[s]),bty='n')
+}
+dev.off()
+
+
+#Fit best model
+final.mod=function(d,MOD,Formula)
 {
   if(MOD=="BIN")
   {
-    Modl=glm(Occurrence~.,data =d, family="binomial", maxit=500)
+    Modl=glm(Formula,data =d, family="binomial", maxit=500)
     
     T.table=summary(Modl)$coefficients
     Percent.dev.exp=100*(Modl$null.deviance-Modl$deviance)/Modl$null.deviance
@@ -1113,98 +1170,118 @@ final.mod=function(d,MOD)
     Anova.tab$Percent.dev.exp=round(Anova.tab$Percent.dev.exp,2)
     return(list(Modl=Modl,Anova.tab=Anova.tab,COEFS=T.table))
   }
-  
 }
-for(s in 1:length(Species))FinalModel[[s]]=final.mod(d=Model.out[[s]]$DATA,MOD="BIN")
+for(s in 1:length(Species))FinalModel[[s]]=final.mod(d=Model.out[[s]]$DATA,
+                                                     MOD="BIN",
+                                                     Formula=FORMULA)
 
 
 
 
 
-# REPORT SECTION
-setwd(paste(WD,"paper",sep="/"))
+# REPORT SECTION-------------------------------------------------------------------------
 
-#Figure 1. map
-add.depth="NO"
-if(add.depth=="YES")
+#-- Figure 1. map
+do.map=FALSE
+if(do.map)
 {
-  Bathymetry_120=read.table("C:/Matias/Data/Mapping/get_data112_120.cgi")
-  Bathymetry_138=read.table("C:/Matias/Data/Mapping/get_data120.05_138.cgi")
-  Bathymetry=rbind(Bathymetry_120,Bathymetry_138)
-  Bathymetry=Bathymetry[order(Bathymetry$V1,Bathymetry$V2),]
-  xbat=sort(unique(Bathymetry$V1))
-  ybat=sort(unique(Bathymetry$V2))
-  reshaped=as.matrix(reshape(Bathymetry,idvar="V1",timevar="V2",v.names="V3", direction="wide"))
-}
-CL1='black'
-fn.Fig1=function(DATA,species,numInt) 
-{
-  id=match(species,names(Data))
-  a=Data[Data[,id]>0,]
-  CL=rgb(.1,.1,.2,alpha=0.2)
-  DATA$LAT=as.numeric(substr(DATA$SLAT,1,5))     #6 minute blocks
-  DATA$LONG=as.numeric(substr(DATA$SLONG,1,5))  
-  A=aggregate(hrs.trawld~LONG+LAT,DATA,sum)
-  Ymax=max(A$hrs.trawld)
-  Ymin=min(A$hrs.trawld)
-  Breaks=c(0,seq(Ymin,Ymax,length.out=(numInt)))
-  b=range(DATA$SLAT)
-  ab=range(DATA$SLONG)
-  #Colfunc <- colorRampPalette(c("yellow","red"))
-  Colfunc <- colorRampPalette(c("grey90","grey10"))
-  Couleurs=c("white",Colfunc(numInt-1))
-  numberLab=10
-  colLeg=(rep(c("black",rep("transparent",numberLab-1)),(numInt+1)/numberLab))
-  AA=A
-  AA$LAT.cen=AA$LAT-.05
-  AA$LONG.cen=AA$LONG+.05 
-  AA=AA[order(AA$LAT.cen),]
-  lat=unique(AA$LAT.cen)
-  Reshaped=as.matrix(reshape(subset(AA,select=c(LONG.cen,LAT.cen,hrs.trawld)),idvar="LONG.cen",timevar="LAT.cen",v.names="hrs.trawld", direction="wide"))	
-  Reshaped=Reshaped[order(Reshaped[,1]),]
-  lon=Reshaped[,1]
-  Reshaped=Reshaped[,-1]	
-  LNG=aa
-  LAT=seq(round(b[1]),round(b[2]),0.5)
-  aa=round(ab[1]):round(ab[2])
-  bb=seq(b[1],b[2],length.out=length(aa))
-  PLATE=c(.01,.9,.075,.9)
-  plotmap(aa,bb,PLATE,"dark grey",ab,b)
-  image(lon,lat,z=Reshaped,xlab="",ylab="",yaxt='n',col =Couleurs,breaks=Breaks,add=T)
-  box()
-  axis(side = 1, at =LNG, labels = LNG, tcl = .5)
-  
-  if(s==1)color.legend(quantile(ab,probs=.9),quantile(b,probs=.5),quantile(ab,probs=.975),quantile(b,probs=.05),
-                       paste(round(Breaks,0),"hrs"),rect.col=Couleurs,gradient="y",col=colLeg,cex=1)
-  box()
-  axis(2,seq(min(lat),max(lat),.25),-seq(min(lat),max(lat),.25))
-  with(a,points(SLONG,SLAT,pch=21,col='white',bg=CL1,cex=1.2))
-  legend("topleft",species,cex=1.5,bty="n")
+  add.depth="NO"
   if(add.depth=="YES")
   {
-    contour(xbat, ybat, reshaped[,2:ncol(reshaped)], zlim=c(-1,-300),
-            nlevels = 5,labcex=1,col="grey30",add=T)
+    Bathymetry_120=read.table("C:/Matias/Data/Mapping/get_data112_120.cgi")
+    Bathymetry_138=read.table("C:/Matias/Data/Mapping/get_data120.05_138.cgi")
+    Bathymetry=rbind(Bathymetry_120,Bathymetry_138)
+    Bathymetry=Bathymetry[order(Bathymetry$V1,Bathymetry$V2),]
+    xbat=sort(unique(Bathymetry$V1))
+    ybat=sort(unique(Bathymetry$V2))
+    reshaped=as.matrix(reshape(Bathymetry,idvar="V1",timevar="V2",v.names="V3", direction="wide"))
   }
+  CL1='black'
+  CL1='color'
+  if(CL1=="color")Colfunc <- colorRampPalette(c("yellow","red"))
+  if(CL1=="black")Colfunc <- colorRampPalette(c("grey90","grey10"))
+  fn.Fig1=function(DATA,species,numInt) 
+  {
+    id=match(species,names(Data))
+    a=Data[Data[,id]>0,]
+    CL=rgb(.1,.1,.2,alpha=0.2)
+    DATA$LAT=as.numeric(substr(DATA$SLAT,1,5))     #6 minute blocks
+    DATA$LONG=as.numeric(substr(DATA$SLONG,1,5))  
+    A=aggregate(hrs.trawld~LONG+LAT,DATA,sum)
+    Ymax=max(A$hrs.trawld)
+    Ymin=min(A$hrs.trawld)
+    Breaks=c(0,seq(Ymin,Ymax,length.out=(numInt)))
+    b=range(DATA$SLAT)
+    ab=range(DATA$SLONG)
+    Couleurs=c("white",Colfunc(numInt-1))
+    numberLab=10
+    colLeg=(rep(c("black",rep("transparent",numberLab-1)),(numInt+1)/numberLab))
+    AA=A
+    AA$LAT.cen=AA$LAT-.05
+    AA$LONG.cen=AA$LONG+.05 
+    AA=AA[order(AA$LAT.cen),]
+    lat=unique(AA$LAT.cen)
+    Reshaped=as.matrix(reshape(subset(AA,select=c(LONG.cen,LAT.cen,hrs.trawld)),idvar="LONG.cen",timevar="LAT.cen",v.names="hrs.trawld", direction="wide"))	
+    Reshaped=Reshaped[order(Reshaped[,1]),]
+    lon=Reshaped[,1]
+    Reshaped=Reshaped[,-1]	
+    aa=round(ab[1]):round(ab[2])
+    LNG=aa
+    LAT=seq(round(b[1]),round(b[2]),0.5)
+    bb=seq(b[1],b[2],length.out=length(aa))
+    PLATE=c(.01,.9,.075,.9)
+    plotmap(aa,bb,PLATE,"dark grey",ab,b)
+    image(lon,lat,z=Reshaped,xlab="",ylab="",yaxt='n',col =Couleurs,breaks=Breaks,add=T)
+    box()
+    axis(side = 1, at =LNG, labels = LNG, tcl = .5)
+    
+    if(s==1)color.legend(quantile(ab,probs=.9),quantile(b,probs=.5),quantile(ab,probs=.975),quantile(b,probs=.05),
+                         paste(round(Breaks,0),"hrs"),rect.col=Couleurs,gradient="y",col=colLeg,cex=1)
+    box()
+    axis(2,seq(min(lat),max(lat),.25),-seq(min(lat),max(lat),.25))
+    
+    if(CL1=="black")
+    {
+      Col='white'
+      Bg=CL1
+    }
+    if(CL1=="color")
+    {
+      Col='white'
+      Bg='forestgreen'
+    }
+    with(a,points(SLONG,SLAT,pch=21,col=Col,bg=Bg,cex=1.2))
+    legend("topleft",names(species),cex=1.25,bty="n")
+    if(add.depth=="YES")
+    {
+      contour(xbat, ybat, -reshaped[,2:ncol(reshaped)], zlim=c(1,300),
+              nlevels = 5,labcex=.85,col="grey60",add=T)
+    }
+  }
+  fn.fig("Figure 1",1600,2400)
+  smart.par(n.plots=length(Species),MAR=c(2,2,.1,1),OMA=c(1,2,.2,.2),MGP=c(2.5,.5,0))
+  for(s in 1:length(Species))  fn.Fig1(DATA=Data,species=Species[s],numInt=20)
+  mtext(expression(paste("Longitude (",degree,"E)",sep="")),1,outer=T,cex=1.5,line=-0.25)
+  mtext(expression(paste("Latitude (",degree,"S)",sep="")),2,las=3,outer=T,cex=1.5,line=0.5)
+  
+  #inset OZ
+  library(PBSmapping)
+  data(worldLLhigh)
+  par(fig=c(0.575,0.975,.05,0.225), new = T,mgp=c(1,.5,0),las=1)
+  #par(fig=c(0.575,0.975,.15,0.45), new = T,mgp=c(1,.5,0),las=1)
+  plotMap(worldLLhigh, xlim=c(113,155),ylim=c(-44.5,-11),plt = c(.1, 1, 0.075, 1),
+          col="grey30",tck = 0.025, tckMinor = 0.0125, xlab="",ylab="",axes=F)
+  box(lwd=2)
+  polygon(x=c(116,116,120,120),y=c(-18,-21,-21,-18),lwd=1.5,col="orange")
+  dev.off()
+  
 }
-fn.fig("Figure 1",1600,2400)
-smart.par(n.plots=length(Species),MAR=c(2,2,.1,1),OMA=c(1,2,.2,.2),MGP=c(2.5,.5,0))
-for(s in 1:length(Species))  fn.Fig1(DATA=Data,species=Species[s],numInt=20)
-mtext("Longitude (?E)",1,outer=T,cex=1.5,line=-0.25)
-mtext("Latitude (?S)",2,las=3,outer=T,cex=1.5,line=0.6)
-
-#inset OZ
-library(PBSmapping)
-data(worldLLhigh)
-par(fig=c(0.575,0.975,.05,0.225), new = T,mgp=c(1,.5,0),las=1)
-#par(fig=c(0.575,0.975,.15,0.45), new = T,mgp=c(1,.5,0),las=1)
-plotMap(worldLLhigh, xlim=c(113,155),ylim=c(-44.5,-11),plt = c(.1, 1, 0.075, 1),
-        col="grey30",tck = 0.025, tckMinor = 0.0125, xlab="",ylab="",axes=F)
-box(lwd=2)
-polygon(x=c(116,116,120,120),y=c(-18,-21,-21,-18),lwd=1.5,col="grey65")
-dev.off()
 
 
-#Figure 2 Barplot of interactions   #ACA
+#-- Figure 2 Barplot of interactions 
+second.axis="darkgreen"
+third.axis="brown4"
+barcol="lightgoldenrod3"
 fn.2=function(species,what)
 {
   id=match(species,names(Data))
@@ -1230,21 +1307,21 @@ fn.2=function(species,what)
   Shots.dpth=subset(Shots.dpth,D%in%sort(Tabdpth$D))
   LISTA=list(list(TabMn,Efrt.Mn,Shots.Mn),list(TabHr,Efrt.Hr,Shots.Hr),list(Tabdpth,Efrt.dpth,Shots.dpth))
   names(LISTA)=c("Month","Hour","Depth (m)")
-  third.axis="grey35"
+
   for(l in 1:length(LISTA))
   {
-    barplot(LISTA[[l]][[1]][,2],col="grey95",cex.names=.85,names.arg=LISTA[[l]][[1]][,1],ylim=c(0,max(LISTA[[l]][[1]][,2])))
+    barplot(LISTA[[l]][[1]][,2],col=barcol,cex.names=.85,names.arg=LISTA[[l]][[1]][,1],ylim=c(0,max(LISTA[[l]][[1]][,2])))
     par(new = T)
-    plot(LISTA[[l]][[2]][,1],LISTA[[l]][[2]][,2],type='l',lwd=2,col=1,axes=F, xlab=NA, ylab=NA,ylim=c(0,max(LISTA[[l]][[2]][,2])))
-    if(s==2)axis(side = 4)
+    plot(LISTA[[l]][[2]][,1],LISTA[[l]][[2]][,2],type='l',lwd=3,col=second.axis,axes=F, xlab=NA, ylab=NA,ylim=c(0,max(LISTA[[l]][[2]][,2])))
+    if(s==2)axis(side = 4,col=second.axis,col.axis=second.axis)
     par(new = T)
-    plot(LISTA[[l]][[3]][,1],LISTA[[l]][[3]][,2],type='l',lwd=2,col=third.axis,axes=F, xlab=NA, ylab=NA,ylim=c(0,max(LISTA[[l]][[3]][,2])))
+    plot(LISTA[[l]][[3]][,1],LISTA[[l]][[3]][,2],type='l',lwd=3,col=third.axis,axes=F, xlab=NA, ylab=NA,ylim=c(0,max(LISTA[[l]][[3]][,2])))
     if(s==2)axis(side = 4.25, line=4.5,col=third.axis,col.axis=third.axis)
     box()
-    if(l==1)mtext(species,3,line=0.25,cex=1.5)
+    if(l==1)mtext(names(species),3,line=0.25,cex=1.5)
     mtext(names(LISTA)[l],1,cex=1.25,line=2)
   }
-  mtext(side = 4, line = 2, 'Hours trawled',outer=T,las=3,cex=1.35)
+  mtext(side = 4, line = 2, 'Hours trawled',outer=T,las=3,cex=1.35,col=second.axis)
   mtext(side = 4, 'Fishing events',outer=T,las=3,col=third.axis,cex=1.35,line=6.5)
   mtext("Interactions",2,line=0,las=3,outer=T,cex=1.35)
 }
@@ -1253,47 +1330,52 @@ par(mfcol=c(3,2),mar=c(2.5,2,2,1),oma=c(1,1.5,1,8),mgp=c(2.5,.5,0),las=1)
 for(s in 1:length(Species))  fn.2(species=Species[s],what='catch')
 dev.off()
 
-#Barplot of interactions by landings
-fn.3=function(species,what)
+#-- Barplot of interactions by landings
+do.this=FALSE
+if(do.this)
 {
-  id=match(species,names(Data))
-  a=Data[Data[,id]>0,]
-  a$D=10*round(a$depth/10)
-  TabMn=aggregate(a[,id]~StartDate.mn,a,sum)
-  TabHr=aggregate(a[,id]~Start.hour,a,sum)
-  Tabdpth=aggregate(a[,id]~D,a,sum)
-  b=Data
-  b$D=10*round(b$depth/10)
-  b$dummy=1
-  Efrt.Mn=aggregate((TotalCatch/1000)~StartDate.mn,b,sum)
-  Efrt.Mn=subset(Efrt.Mn,StartDate.mn%in%sort(TabMn$StartDate.mn))
-  
-  Efrt.Hr=aggregate((TotalCatch/1000)~Start.hour,b,sum)
-  Efrt.Hr=subset(Efrt.Hr,Start.hour%in%sort(TabHr$Start.hour))
-  Efrt.dpth=aggregate((TotalCatch/1000)~D,b,sum)
-  Efrt.dpth=subset(Efrt.dpth,D%in%sort(Tabdpth$D))
-  LISTA=list(list(TabMn,Efrt.Mn,Shots.Mn),list(TabHr,Efrt.Hr,Shots.Hr),list(Tabdpth,Efrt.dpth,Shots.dpth))
-  names(LISTA)=c("Month","Hour","Depth (m)")
-  third.axis="grey35"
-  for(l in 1:length(LISTA))
+  fn.3=function(species,what)
   {
-    barplot(LISTA[[l]][[1]][,2],col="grey95",cex.names=.85,names.arg=LISTA[[l]][[1]][,1],ylim=c(0,max(LISTA[[l]][[1]][,2])))
-    par(new = T)
-    plot(LISTA[[l]][[2]][,1],LISTA[[l]][[2]][,2],type='l',lwd=2,col=1,axes=F, xlab=NA, ylab=NA,ylim=c(0,max(LISTA[[l]][[2]][,2])))
-    if(s==2)axis(side = 4)
-    box()
-    if(l==1)mtext(species,3,line=0.25,cex=1.5)
-    mtext(names(LISTA)[l],1,cex=1.25,line=2)
+    id=match(species,names(Data))
+    a=Data[Data[,id]>0,]
+    a$D=10*round(a$depth/10)
+    TabMn=aggregate(a[,id]~StartDate.mn,a,sum)
+    TabHr=aggregate(a[,id]~Start.hour,a,sum)
+    Tabdpth=aggregate(a[,id]~D,a,sum)
+    b=Data
+    b$D=10*round(b$depth/10)
+    b$dummy=1
+    Efrt.Mn=aggregate((TotalCatch/1000)~StartDate.mn,b,sum)
+    Efrt.Mn=subset(Efrt.Mn,StartDate.mn%in%sort(TabMn$StartDate.mn))
+    
+    Efrt.Hr=aggregate((TotalCatch/1000)~Start.hour,b,sum)
+    Efrt.Hr=subset(Efrt.Hr,Start.hour%in%sort(TabHr$Start.hour))
+    Efrt.dpth=aggregate((TotalCatch/1000)~D,b,sum)
+    Efrt.dpth=subset(Efrt.dpth,D%in%sort(Tabdpth$D))
+    LISTA=list(list(TabMn,Efrt.Mn,Shots.Mn),list(TabHr,Efrt.Hr,Shots.Hr),list(Tabdpth,Efrt.dpth,Shots.dpth))
+    names(LISTA)=c("Month","Hour","Depth (m)")
+    third.axis="grey35"
+    for(l in 1:length(LISTA))
+    {
+      barplot(LISTA[[l]][[1]][,2],col="grey95",cex.names=.85,names.arg=LISTA[[l]][[1]][,1],ylim=c(0,max(LISTA[[l]][[1]][,2])))
+      par(new = T)
+      plot(LISTA[[l]][[2]][,1],LISTA[[l]][[2]][,2],type='l',lwd=2,col=1,axes=F, xlab=NA, ylab=NA,ylim=c(0,max(LISTA[[l]][[2]][,2])))
+      if(s==2)axis(side = 4)
+      box()
+      if(l==1)mtext(species,3,line=0.25,cex=1.5)
+      mtext(names(LISTA)[l],1,cex=1.25,line=2)
+    }
+    mtext(side = 4, line = 2, 'Total landings (tons)',outer=T,las=3,cex=1.35)
+    mtext("Interactions",2,line=0,las=3,outer=T,cex=1.35)
   }
-  mtext(side = 4, line = 2, 'Total landings (tons)',outer=T,las=3,cex=1.35)
-  mtext("Interactions",2,line=0,las=3,outer=T,cex=1.35)
+  fn.fig("Interactions by landings",2100,2400)
+  par(mfcol=c(3,2),mar=c(2.5,2,2,1),oma=c(1,1.5,1,4),mgp=c(2.5,.5,0),las=1)
+  for(s in 1:length(Species))  fn.3(species=Species[s],what='catch')
+  dev.off()
 }
-fn.fig("Interactions by landings",2100,2400)
-par(mfcol=c(3,2),mar=c(2.5,2,2,1),oma=c(1,1.5,1,4),mgp=c(2.5,.5,0),las=1)
-for(s in 1:length(Species))  fn.3(species=Species[s],what='catch')
-dev.off()
 
-#Table 1
+
+#-- Table 1
 SawfishGreenALIVE=sum(Data$SawfishGreenALIVE)
 SawfishGreenDEAD=sum(Data$SawfishGreenDEAD)
 SawfishNarrowALIVE=sum(Data$SawfishNarrowALIVE)
@@ -1306,26 +1388,40 @@ Tab1=data.frame(GreenALIVE=SawfishGreenALIVE,GreenDEAD=SawfishGreenDEAD,
                 Tot.records=Tot.records,Tot.effort=Tot.effort)
 write.csv(Tab1,"Tab1.csv")
 
-#Figure S1. histogram of number caught
-library("plotrix")
-fn.S1=function(species)
-{
-  id=match(species,names(Data))
-  a=Data[Data[,id]>0,]
-  Percent.occur=round(100*nrow(a)/nrow(Data),2)
-  TAB=table(Data[,id])
-  barplot(TAB, log="y",ylab="",xlab="")
-  box()
-  legend('topright',paste(Percent.occur,"% of records",sep=""),bty='n',title=species,cex=1.25)
-}
+
+#-- Figure S1. histogram of number caught
 fn.fig("S1_Semi_log_histogram_num_caught",2000,2400)
-smart.par(n.plots=length(Species),MAR=c(1.75,2.5,.1,1),OMA=c(1.75,2,.5,.1),MGP=c(2,.5,0))
-for(s in 1:length(Species))fn.S1(species=Species[s]) 
-mtext("Number of indviduals caught",1,outer=T,cex=1.5)
-mtext("Number of records",2,line=0.5,las=3,outer=T,cex=1.5)
+Percent.occur.green=round(100*nrow(Data[Data[,"SawfishGreen"]>0,])/nrow(Data),2)
+Percent.occur.narrow=round(100*nrow(Data[Data[,"SawfishNarrow"]>0,])/nrow(Data),2)
+Data%>%
+  dplyr::select(SawfishNarrow,SawfishGreen)%>%
+  gather("Species","n")%>%
+  mutate(Species=ifelse(Species=="SawfishGreen","Green sawfish",
+                        "Narrow sawfish"))%>%
+  group_by(Species)%>%
+  count(n)%>%
+  mutate(nn=ifelse(nn==1,1.05,nn),
+         LBL=ifelse(Species=="Green sawfish",paste(Species," (",Percent.occur.green,"% of records)",sep=""),
+                    paste(Species," (",Percent.occur.narrow,"% of records)",sep="")))%>%  #add dummy so log(1) is shown
+  ggplot(aes(x=factor(n),y=nn)) + 
+  geom_bar(stat="identity",fill=barcol) +
+  scale_y_log10()+
+  facet_wrap(~LBL, ncol = 1)+
+  xlab("Number of individuals caught")+ylab("Number of records")+
+  theme(strip.text.x = element_text(size = 15),
+        axis.text = element_text(size = 14),
+        axis.title=element_text(size = 16),
+        panel.background = element_rect(fill = "white",
+                                        colour = "black",
+                                        size = 0.5, linetype = "solid"),
+        panel.grid.major = element_line(size = .5, linetype = 'dashed',
+                                        colour = "grey60"), 
+        panel.grid.minor = element_line(size = 0.25, linetype = 'dashed',
+                                        colour = "grey60"),
+        strip.background =element_rect(fill="white"))
 dev.off()
 
-#Figure S2. Interactions by year
+#-- Figure S2. Interactions by year
 CL1='deepskyblue3'
 CL2='forestgreen'
 fn.S2=function(DATA,VAR,numInt) 
@@ -1371,77 +1467,47 @@ fn.S2=function(DATA,VAR,numInt)
     aa1=a1[a1[,match(VAR,names(a1))]==vaR[y],]
     with(aa1,points(SLONG,SLAT,pch=21,col='white',bg=CL2,cex=1.5))   
     
-    legend('bottom',paste(vaR[y]),bty='n',cex=1.1)
-    legend('topleft',c(paste(sum(aa[,id]),Species[1]),paste(sum(aa1[,iid]),Species[2])),
+    mtext(paste(vaR[y]),3,cex=1.1)
+    #legend('bottom',paste(vaR[y]),bty='n',cex=1.1)
+    legend('topleft',c(paste(sum(aa[,id]),names(Species)[1]),
+                       paste(sum(aa1[,iid]),names(Species[2]))),
            bty='n',cex=1.1,text.col=c(CL1,CL2))
   }
-  mtext("Longitude (?E)",1,outer=T)
-  mtext("Latitude (?S)",2,line=0.5,las=3,outer=T)
+  mtext(expression(paste("Longitude (",degree,"E)",sep="")),1,outer=T)
+  mtext(expression(paste("Latitude (",degree,"S)",sep="")),2,line=0.5,las=3,outer=T)
+  
 }
 fn.fig("S2_interactions_by_year",2400,2400)
 fn.S2(DATA=Data,VAR='StartDate.yr',numInt=20)
 dev.off()
 
 
-#AUC figure. Compare models
-source("C:/Matias/Analyses/SOURCE_SCRIPTS/Smart_par.R")
-fun.pred.auc=function(moDl,NMS,test)
+#-- Show marginal effects  ACA
+pred.fun=function(mod,biascor,PRED)             
 {
-  #pred probability
-  if(class(moDl)[1]=="train"){pred.prob=predict(moDl,test,type='prob',n.trees=moDl$bestTune$n.trees)}else
+  if(biascor=="YES")  #apply bias correction for log transf
   {
-    pred.prob=predict(moDl,test,'response')
-    pred.prob=data.frame(no=pred.prob)
-    pred.prob$yes=1-pred.prob$no
+    lsm=summary(emmeans(mod, PRED, type="link"))%>%
+      mutate(response=exp(emmean)*exp(SE^2/2),
+             lower.CL=exp(lower.CL)*exp(SE^2/2),
+             upper.CL=exp(upper.CL)*exp(SE^2/2))
   }
-  #auc
-  auc=roc(test$Occurrence, pred.prob[,match('yes',names(pred.prob))])  #.5 is random model; 1 is perfect model
-  Preds=cbind(pred.prob)
-  names(Preds)=paste(NMS,names(Preds),sep="_")
-  return(list(Preds=Preds,auc=auc))
-}
-best.mdl=function(modl)
-{
-  Fits=names(modl)[-match(c("test","train","DATA"),names(modl))]
-  AUCs=vector('list',length(Fits))
-  names(AUCs)=Fits
-  for(f in 1:length(Fits))
-  {
-    AUCs[[f]]=fun.pred.auc(moDl=modl[[match(Fits[f],names(modl))]],NMS=Fits[f],test=modl[[match('test',names(modl))]])   
-  }
+  if(biascor=="NO") lsm=summary(emmeans(mod, PRED, type="response"))
   
-  return(list(AUC=AUCs))
+  lsm$SD=lsm$SE
+  
+  return(lsm)
 }
-for(s in 1:length(Species))Best.MDL[[s]]=best.mdl(modl=Model.out[[s]])
-
-fn.fig("AUC",1600,2400)
-smart.par(n.plots=length(Species),MAR=c(4,1,1,1),OMA=rep(1,4),MGP=c(2.5,.7,0))
-for(s in 1:length(Species))
-{
-  plot(Best.MDL[[s]]$AUC[[1]]$auc)
-  aucs=rep(NA,length(Best.MDL[[s]]$AUC))
-  aucs[1]=Best.MDL[[s]]$AUC[[1]]$auc$auc[1]
-  CL=2:length(Best.MDL[[s]]$AUC)
-  for(l in CL)
-  {
-    lines(Best.MDL[[s]]$AUC[[l]]$auc,col=CL[l-1])
-    aucs[l]=Best.MDL[[s]]$AUC[[l]]$auc$auc[1]
-  }
-  nombres=names(Best.MDL[[s]]$AUC)  
-  #nombres=read.table(text = nombres, sep = ".", as.is = TRUE)$V2
-  legend('bottomright',paste(nombres,round(aucs,3)),lty=1,col=c(1,CL),bty='n',title="AUC",cex=1)
-  legend("topleft",Species[s],bty='n')
-}
-dev.off()
-
-
-#Marginal effect
+pred.fun(mod=FinalModel[[s]]$Modl,
+         biascor="NO",
+         PRED="Season")
 fn.marg.eff=function(d,modl)
 {
   #Season effect
-  Ef.seq=seq(min(round(d$hrs.trawld,1)),round(Eff.quantile[match("90%",names(Eff.quantile))],1),by=.1)
   Eff.quantile=quantile(d$hrs.trawld,probs=seq(0,1,.05))
+  Ef.seq=seq(min(round(d$hrs.trawld,1)),round(Eff.quantile[match("90%",names(Eff.quantile))],1),by=.1)
   nd <- data.frame(Season = factor(rep(c("AuWin","SprSu"),each=length(Ef.seq)),levels=levels(d$Season)), 
+                   StartDate.yr=factor(names(rev(sort(table(d$StartDate.yr)))[1]),levels=levels(d$StartDate.yr)),
                    VESSEL = factor(names(rev(sort(table(d$VESSEL)))[1]),levels=levels(d$VESSEL)),
                    Day_night = factor(names(rev(sort(table(d$Day_night)))[1]),levels=levels(d$Day_night)),
                    long = mean(d$long),
@@ -1472,6 +1538,7 @@ fn.marg.eff=function(d,modl)
   #Average seasonal effect
   nd <- data.frame(Season = factor(c("AuWin","SprSu")), 
                    VESSEL = factor(names(rev(sort(table(d$VESSEL)))[1]),levels=levels(d$VESSEL)),
+                   StartDate.yr=factor(names(rev(sort(table(d$StartDate.yr)))[1]),levels=levels(d$StartDate.yr)),
                    Day_night = factor(names(rev(sort(table(d$Day_night)))[1]),levels=levels(d$Day_night)),
                    long = mean(d$long),
                    TotalCatch = mean(d$TotalCatch),
@@ -1493,7 +1560,7 @@ dev.off()
 
 write.csv(Avg.prob.season,"Avg.prob.season.csv")
 
-#Export Anova table
+#-- Export Anova table
 NMS=colnames(FinalModel$SawfishNarrow$Anova.tab)
 TABL.Anova=cbind(FinalModel$SawfishNarrow$Anova.tab,FinalModel$SawfishGreen$Anova.tab)
 colnames(TABL.Anova)=c(paste("SawfishNarrow",NMS,sep="_"),
@@ -1509,9 +1576,8 @@ write.csv(TABL.COEF,"COEF.csv",row.names=T)
 
 
 
-#######
 
-#NOTE used
+# NOTE used-------------------------------------------------------------------------
 NOT.used="NO"
 if(NOT.used=="YES")
 {
