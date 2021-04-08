@@ -26,10 +26,16 @@ library(dplyr)
 #any(grepl("rpart", installed.packages()))  #check if rpart is installed
 library("readxl")
 library("plotrix")
+library(mgcv)
+library("AER") #overdisperion test
+library(doParallel)
+library(sampling)
+library(tidyverse)
+
 
 source("C:/Matias/Analyses/SOURCE_SCRIPTS/Git_Population.dynamics/fn.fig.R")
-Do.tiff="NO"    #select figure extension
-Do.jpeg="YES"
+Do.tiff="YES"   #select figure extension
+Do.jpeg="NO"
 source("C:/Matias/Analyses/SOURCE_SCRIPTS/Git_other/Plot.Map.R") 
 
 setwd('C:/Matias/Analyses/Sawfish/Pilbara')
@@ -44,7 +50,10 @@ Current.date=as.POSIXlt(Sys.Date())
 trawl.hour_max=7
 Current.year=2020 #last year with complete data
 do.effort.cut="NO"  #if cutting effort at different levels
+Fit.To="Number"
 
+n.boot=100      #bootstrap zero inflated CI
+set.seed(666) 
 
 # Data manipulation-------------------------------------------------------------------------
 
@@ -771,7 +780,7 @@ if(Chck.Corr=="YES")
 #       data points that are included in the sample and not generalizable outside the sample.
 
 FACTORS=c("StartDate.yr","Season","VESSEL","Day_night")
-COVS= c("hrs.trawld","long","depth","StartDate.mn","Start.hour") 
+COVS= c("hrs.trawld","lat","long","depth","StartDate.mn","Start.hour") 
 TERMS=c(FACTORS,COVS)
  
 Data=Data%>%
@@ -959,7 +968,7 @@ Model.d$Eff.bin=factor(with(Model.d,
 
 
 
-#2. Apply binomial and boosted regresssion trees
+#2. Apply GLM, GAM and boosted regresssion trees
 
 
 #Check if factors more than 32 levels (Random Forest won't work)
@@ -985,36 +994,31 @@ CORES=detectCores()-1
 cat(CORES, " cores detected.")
 
 
-#Fit models     #takes 18 sec   ACA
+#Fit models 
 Model.out=vector('list',length(Species))
 names(Model.out)=Species
 Best.MDL=FinalModel=Model.out
 FORMULA=formula(Occurrence~StartDate.yr + Season + VESSEL + Day_night  + 
                   long + depth + offset(hrs.trawld))
-#FORMULA=formula(Occurrence~.)
 
-fn.models=function(species,METRIC,Formula,scaled.d)
+fn.models=function(species,METRIC,Formula,scaled.d,fit.to)
 {
-  #select if doing analyses on scaled data 
+  #1. Select relevant variables and if doing analyses on scaled data 
   if(scaled.d=="NO")  d=Model.d[,c(species,TERMS)]
   if(scaled.d=="YES") d=Model.d.scaled[,c(species,TERMS)]
   
-  #remove noise
-  #id=d[d[,match(species,names(d))]>0,]
-  #d=subset(d,hrs.trawld<=max(id$hrs.trawld)) 
-  
-  #set character variables to factors
+  #2. Set character variables to factors
   d[FACTORS] <- lapply(d[FACTORS], factor)
   
-  #Define presence/absence response variable
+  #3. Define presence/absence response variable
   d=d%>%
-    mutate(Occurrence=get(species),
-           Occurrence=ifelse(Occurrence>0,1,0),
+    mutate(Number=get(species),
+           Occurrence=ifelse(Number>0,1,0),
            Occurrence=factor(ifelse(Occurrence==1,"yes","no"),
                              levels=c("yes","no")))%>% #have presence as first levels
     dplyr::select(-all_of(species))
-
   
+  d=d%>%filter(depth<200)
   #weight   
   # d$hrs.trawld.bin=cut(d$hrs.trawld,breaks=seq(0,round(max(d$hrs.trawld)),.5))#30 min bins (the way the fishers operate)
   # Tab.weight=as.matrix(table(d$hrs.trawld.bin))
@@ -1022,159 +1026,232 @@ fn.models=function(species,METRIC,Formula,scaled.d)
   # d=merge(d,Tab.weight,by="hrs.trawld.bin")
   
   
-  #Partition data
-  ind <- createDataPartition(d$Occurrence,times = 1,p = 0.7,list = FALSE)
-  train <- d[ind,]
-  test <- d[-ind,]
+  #6. Fit models
   
-  #Smote data
-  train.smote <- SMOTE(Occurrence~ ., train, perc.over = 100, perc.under=200)
-  #train.smote$Occurrence=as.character(train.smote$Occurrence)
-  #train.smote$Occurrence=with(train.smote,ifelse(Occurrence=="1",1,0))
-  #prop.table(table(train.smote$Occurrence))
+  #6.1 Probability of capture only
+  if(fit.to=='Occurrence') 
+  {
+    #Data partition
+    ind <- createDataPartition(d$Occurrence,times = 1,p = 0.7,list = FALSE)
+    train <- d[ind,]
+    test <- d[-ind,]
+    
+    #Smote data
+    train.smote <- SMOTE(Occurrence~ ., train, perc.over = 100, perc.under=200)
+    train.smote$Number=round(train.smote$Number)
+    #prop.table(table(train.smote$Occurrence)) #check balanced data
+    
+    
+    #Binomial
+    BIN=glm(Formula,data =train, family="binomial", maxit=500)
+    
+    #Binomial to smote data
+    BIN.smote=glm(Formula,data =train.smote, family="binomial", maxit=500)
+    
+    #Binomial brglm
+    Brglm <- brglm(Formula, data = train)
+    
+    #GBM
+    #register cluster to train in parallel (only works for Xgboost)
+    cl <-makeCluster(CORES, type = "SOCK") 
+    registerDoSNOW(cl)
+    #Control
+    ctrl <- trainControl(method = "repeatedcv",
+                         number = 10,     #split data in ten ways to build 10 models
+                         repeats = 3,     #repeat 10 fold cross validation 3 times
+                         classProbs = TRUE,     #needed to score models using AUC
+                         summaryFunction = twoClassSummary,
+                         search = "grid")     #find optimal collection of parameters using default grid
+    #gbm
+    fit.gbm <- train(Formula,
+                     data=train, 
+                     method='gbm', 
+                     metric = METRIC,
+                     trControl=ctrl,
+                     na.action=na.exclude)
+    #gbm smote
+    fit.gbm.smote <- train(Formula,
+                           data=train.smote,
+                           method='gbm',
+                           metric = METRIC,
+                           trControl=ctrl,
+                           na.action=na.exclude)
+    
+    
+    #clear parameters for parallel computation
+    stopCluster(cl)
+    registerDoSEQ()
+    remove(cl)
+    
+    
+    return(list(DATA=d,train=train,test=test,BIN=BIN,BIN.smote=BIN.smote,
+                Brglm=Brglm,GBM=fit.gbm,GBM.smote=fit.gbm.smote))
+  }
   
+  #6.2 Zero inflated numbers
+  if(fit.to=='Number') 
+  {
+    #Smote data
+    d.smote <- SMOTE(Occurrence~ ., d, perc.over = 100, perc.under=200)
+    d.smote$Number=round(d.smote$Number)
+    
+    
+    #GLM
+    do.glims=FALSE
+    if(do.glims)
+    {
+      ZIP <- zeroinfl(as.formula(Number ~ StartDate.yr|
+                                   StartDate.mn),
+                      data = d,
+                      dist = "poisson")
+      ZINB <- zeroinfl(as.formula(Number ~ StartDate.mn |
+                                    StartDate.mn),
+                       data = d,
+                       dist = "negbin")
+      ZIP.smote <- zeroinfl(as.formula(Number ~ StartDate.mn |
+                                         StartDate.mn),
+                            data = d.smote,
+                            dist = "poisson")
+      ZINB.smote <- zeroinfl(as.formula(Number ~ StartDate.mn |
+                                          StartDate.mn),
+                             data = d.smote,
+                             dist = "negbin")
+      
+    }
+    
+    #GAM
+    #Poisson
+    GAM_Pois <- gam(Number ~ s(StartDate.mn,k=12,bs='cc')+hrs.trawld+StartDate.yr+s(long)+
+                      s(Start.hour,k=24,bs='cc'),
+                    data = d,
+                    family = 'poisson',
+                    method = "REML")
+    
+    #Negative Binomial
+    Overdispersion=dispersiontest(GAM_Pois,trafo=1) #no need for NB
+    GAM_NB=NULL
+    if(Overdispersion$estimate>1.1)
+    {
+      GAM_NB <- gam(Number ~ s(StartDate.mn,k=12,bs='cc')+hrs.trawld+StartDate.yr+s(long)+
+                      s(Start.hour,k=24,bs='cc'),
+                    data = d,
+                    family = nb(),
+                    method = "REML")
+    }
+    
+    #Zero inflated Poisson
+    GAM_ZIP <- gam(list(Number ~ hrs.trawld,  #Poisson process
+                        ~ s(StartDate.mn,k=12,bs='cc')+hrs.trawld+StartDate.yr+s(long)+s(Start.hour,k=24,bs='cc')), #Probability
+                   data = d,
+                   family = ziplss,
+                   method = "REML")
+    
+    
+    return(list(DATA=d,GAM_ZIP=GAM_ZIP,GAM_Pois=GAM_Pois,GAM_NB=GAM_NB))
+  }
   
-  #Fit models
-  
-  #Binomial
-  BIN=glm(Formula,data =train, family="binomial", maxit=500)
-  
-  #Binomial to smote data
-  BIN.smote=glm(Formula,data =train.smote, family="binomial", maxit=500)
-  
-  #Binomial brglm
-  Brglm <- brglm(Formula, data = train)
-  
-  #GBM
-  #register cluster to train in parallel (only works for Xgboost)
-  cl <-makeCluster(CORES, type = "SOCK") 
-  registerDoSNOW(cl)
-  #Control
-  ctrl <- trainControl(method = "repeatedcv",
-                       number = 10,     #split data in ten ways to build 10 models
-                       repeats = 3,     #repeat 10 fold cross validation 3 times
-                       classProbs = TRUE,     #needed to score models using AUC
-                       summaryFunction = twoClassSummary,
-                       search = "grid")     #find optimal collection of parameters using default grid
-  #gbm
-  fit.gbm <- train(Formula,
-                   data=train, 
-                   method='gbm', 
-                   metric = METRIC,
-                   trControl=ctrl,
-                   na.action=na.exclude)
-  #gbm smote
-  fit.gbm.smote <- train(Formula,
-                         data=train.smote,
-                         method='gbm',
-                         metric = METRIC,
-                         trControl=ctrl,
-                         na.action=na.exclude)
-  
-
-  #clear parameters for parallel computation
-  stopCluster(cl)
-  registerDoSEQ()
-  remove(cl)
-  
-  
-  return(list(DATA=d,train=train,test=test,BIN=BIN,BIN.smote=BIN.smote,
-              Brglm=Brglm,GBM=fit.gbm,GBM.smote=fit.gbm.smote))
 }
 system.time({for(s in 1:length(Species))Model.out[[s]]=fn.models(species=Species[s],
                                                                  METRIC="Sens",
                                                                  Formula=FORMULA,
-                                                                 scaled.d="NO")})
+                                                                 scaled.d="NO",
+                                                                 fit.to='Number')})
+
+
 setwd(paste(WD,"paper",sep="/"))
 
 
 #Determine best model
- #-- AUC
-smart.par=function(n.plots,MAR,OMA,MGP) return(par(mfrow=n2mfrow(n.plots),mar=MAR,oma=OMA,las=1,mgp=MGP))
-fun.pred.auc=function(moDl,NMS,test)
+if(Fit.To=='Occurrence')
 {
-  #pred probability
-  if(class(moDl)[1]=="train"){pred.prob=predict(moDl,test,type='prob',n.trees=moDl$bestTune$n.trees)}else
+  #-- AUC
+  smart.par=function(n.plots,MAR,OMA,MGP) return(par(mfrow=n2mfrow(n.plots),mar=MAR,oma=OMA,las=1,mgp=MGP))
+  fun.pred.auc=function(moDl,NMS,test)
   {
-    pred.prob=predict(moDl,test,'response')
-    pred.prob=data.frame(no=pred.prob)
-    pred.prob$yes=1-pred.prob$no
+    #pred probability
+    if(class(moDl)[1]=="train"){pred.prob=predict(moDl,test,type='prob',n.trees=moDl$bestTune$n.trees)}else
+    {
+      pred.prob=predict(moDl,test,'response')
+      pred.prob=data.frame(no=pred.prob)
+      pred.prob$yes=1-pred.prob$no
+    }
+    #auc
+    auc=roc(test$Occurrence, pred.prob[,match('yes',names(pred.prob))])  #.5 is random model; 1 is perfect model
+    Preds=cbind(pred.prob)
+    names(Preds)=paste(NMS,names(Preds),sep="_")
+    return(list(Preds=Preds,auc=auc))
   }
-  #auc
-  auc=roc(test$Occurrence, pred.prob[,match('yes',names(pred.prob))])  #.5 is random model; 1 is perfect model
-  Preds=cbind(pred.prob)
-  names(Preds)=paste(NMS,names(Preds),sep="_")
-  return(list(Preds=Preds,auc=auc))
-}
-best.mdl=function(modl)
-{
-  Fits=names(modl)[-match(c("test","train","DATA"),names(modl))]
-  AUCs=vector('list',length(Fits))
-  names(AUCs)=Fits
-  for(f in 1:length(Fits))
+  best.mdl=function(modl)
   {
-    AUCs[[f]]=fun.pred.auc(moDl=modl[[match(Fits[f],names(modl))]],NMS=Fits[f],test=modl[[match('test',names(modl))]])   
+    Fits=names(modl)[-match(c("test","train","DATA"),names(modl))]
+    AUCs=vector('list',length(Fits))
+    names(AUCs)=Fits
+    for(f in 1:length(Fits))
+    {
+      AUCs[[f]]=fun.pred.auc(moDl=modl[[match(Fits[f],names(modl))]],NMS=Fits[f],test=modl[[match('test',names(modl))]])   
+    }
+    
+    return(list(AUC=AUCs))
   }
+  for(s in 1:length(Species))Best.MDL[[s]]=best.mdl(modl=Model.out[[s]])
   
-  return(list(AUC=AUCs))
-}
-for(s in 1:length(Species))Best.MDL[[s]]=best.mdl(modl=Model.out[[s]])
-
-fn.fig("S3_AUC",1600,2400)
-smart.par(n.plots=length(Species),MAR=c(4,1,1,1),OMA=rep(1,4),MGP=c(2.5,.7,0))
-for(s in 1:length(Species))
-{
-  plot(Best.MDL[[s]]$AUC[[1]]$auc)
-  aucs=rep(NA,length(Best.MDL[[s]]$AUC))
-  aucs[1]=Best.MDL[[s]]$AUC[[1]]$auc$auc[1]
-  CL=2:length(Best.MDL[[s]]$AUC)
-  for(l in CL)
+  fn.fig("S3_AUC",1600,2400)
+  smart.par(n.plots=length(Species),MAR=c(4,1,1,1),OMA=rep(1,4),MGP=c(2.5,.7,0))
+  for(s in 1:length(Species))
   {
-    lines(Best.MDL[[s]]$AUC[[l]]$auc,col=CL[l-1])
-    aucs[l]=Best.MDL[[s]]$AUC[[l]]$auc$auc[1]
+    plot(Best.MDL[[s]]$AUC[[1]]$auc)
+    aucs=rep(NA,length(Best.MDL[[s]]$AUC))
+    aucs[1]=Best.MDL[[s]]$AUC[[1]]$auc$auc[1]
+    CL=2:length(Best.MDL[[s]]$AUC)
+    for(l in CL)
+    {
+      lines(Best.MDL[[s]]$AUC[[l]]$auc,col=CL[l-1])
+      aucs[l]=Best.MDL[[s]]$AUC[[l]]$auc$auc[1]
+    }
+    nombres=names(Best.MDL[[s]]$AUC)  
+    #nombres=read.table(text = nombres, sep = ".", as.is = TRUE)$V2
+    legend('bottomright',paste(nombres,round(aucs,3)),lty=1,col=c(1,CL),bty='n',title="AUC",cex=1)
+    legend("topleft",names(Species[s]),bty='n')
   }
-  nombres=names(Best.MDL[[s]]$AUC)  
-  #nombres=read.table(text = nombres, sep = ".", as.is = TRUE)$V2
-  legend('bottomright',paste(nombres,round(aucs,3)),lty=1,col=c(1,CL),bty='n',title="AUC",cex=1)
-  legend("topleft",names(Species[s]),bty='n')
+  dev.off()
 }
-dev.off()
-
 
 #Fit best model
-final.mod=function(d,MOD,Formula)
+if(Fit.To=='Occurrence')
 {
-  if(MOD=="BIN")
+  final.mod=function(d,MOD,Formula)
   {
-    Modl=glm(Formula,data =d, family="binomial", maxit=500)
-    
-    T.table=summary(Modl)$coefficients
-    Percent.dev.exp=100*(Modl$null.deviance-Modl$deviance)/Modl$null.deviance
-    
-    Anova.tab=anova(Modl,test="Chisq")
-    
-    n=2:length(Anova.tab$Deviance)
-    Term.dev.exp=100*(Anova.tab$Deviance[n]/Modl$null.deviance)
-    names(Term.dev.exp)=rownames(Anova.tab)[n]
-    Anov.tab=as.data.frame.matrix(Anova.tab)
-    Term.tab=data.frame(Percent.dev.exp=Term.dev.exp)
-    Anova.tab=Anova.tab[-1,match(c("Deviance","Pr(>Chi)"),names(Anova.tab))]
-    Anova.tab=cbind(Anova.tab,Term.tab)
-    Anova.tab=Anova.tab[,-match("Deviance",names(Anova.tab))]
-    Anova.tab$"Pr(>Chi)"=ifelse(Anova.tab$"Pr(>Chi)"<0.001,"<0.001",round(Anova.tab$"Pr(>Chi)",3))
-    Total=Anova.tab[1,]
-    Total$"Pr(>Chi)"=""
-    Total$Percent.dev.exp=sum(Anova.tab$Percent.dev.exp)
-    rownames(Total)="Total"
-    Anova.tab=rbind(Anova.tab,Total)
-    Anova.tab$Percent.dev.exp=round(Anova.tab$Percent.dev.exp,2)
-    return(list(Modl=Modl,Anova.tab=Anova.tab,COEFS=T.table))
+    if(MOD=="BIN")
+    {
+      Modl=glm(Formula,data =d, family="binomial", maxit=500)
+      
+      T.table=summary(Modl)$coefficients
+      Percent.dev.exp=100*(Modl$null.deviance-Modl$deviance)/Modl$null.deviance
+      
+      Anova.tab=anova(Modl,test="Chisq")
+      
+      n=2:length(Anova.tab$Deviance)
+      Term.dev.exp=100*(Anova.tab$Deviance[n]/Modl$null.deviance)
+      names(Term.dev.exp)=rownames(Anova.tab)[n]
+      Anov.tab=as.data.frame.matrix(Anova.tab)
+      Term.tab=data.frame(Percent.dev.exp=Term.dev.exp)
+      Anova.tab=Anova.tab[-1,match(c("Deviance","Pr(>Chi)"),names(Anova.tab))]
+      Anova.tab=cbind(Anova.tab,Term.tab)
+      Anova.tab=Anova.tab[,-match("Deviance",names(Anova.tab))]
+      Anova.tab$"Pr(>Chi)"=ifelse(Anova.tab$"Pr(>Chi)"<0.001,"<0.001",round(Anova.tab$"Pr(>Chi)",3))
+      Total=Anova.tab[1,]
+      Total$"Pr(>Chi)"=""
+      Total$Percent.dev.exp=sum(Anova.tab$Percent.dev.exp)
+      rownames(Total)="Total"
+      Anova.tab=rbind(Anova.tab,Total)
+      Anova.tab$Percent.dev.exp=round(Anova.tab$Percent.dev.exp,2)
+      return(list(Modl=Modl,Anova.tab=Anova.tab,COEFS=T.table))
+    }
   }
+  for(s in 1:length(Species))FinalModel[[s]]=final.mod(d=Model.out[[s]]$DATA,
+                                                       MOD="BIN",
+                                                       Formula=FORMULA)
 }
-for(s in 1:length(Species))FinalModel[[s]]=final.mod(d=Model.out[[s]]$DATA,
-                                                     MOD="BIN",
-                                                     Formula=FORMULA)
-
 
 
 
@@ -1482,97 +1559,520 @@ fn.S2(DATA=Data,VAR='StartDate.yr',numInt=20)
 dev.off()
 
 
-#-- Show marginal effects  ACA
-pred.fun=function(mod,biascor,PRED)             
+#-- Show marginal effects  
+if(Fit.To=='Occurrence')
 {
-  if(biascor=="YES")  #apply bias correction for log transf
+  pred.fun=function(mod,biascor,PRED)             
   {
-    lsm=summary(emmeans(mod, PRED, type="link"))%>%
-      mutate(response=exp(emmean)*exp(SE^2/2),
-             lower.CL=exp(lower.CL)*exp(SE^2/2),
-             upper.CL=exp(upper.CL)*exp(SE^2/2))
+    if(biascor=="YES")  #apply bias correction for log transf
+    {
+      lsm=summary(emmeans(mod, PRED, type="link"))%>%
+        mutate(response=exp(emmean)*exp(SE^2/2),
+               lower.CL=exp(lower.CL)*exp(SE^2/2),
+               upper.CL=exp(upper.CL)*exp(SE^2/2))
+    }
+    if(biascor=="NO") lsm=summary(emmeans(mod, PRED, type="response"))
+    
+    lsm$SD=lsm$SE
+    
+    return(lsm)
   }
-  if(biascor=="NO") lsm=summary(emmeans(mod, PRED, type="response"))
+  pred.fun(mod=FinalModel[[s]]$Modl,
+           biascor="NO",
+           PRED="Season")
+  fn.marg.eff=function(d,modl)
+  {
+    #Season effect
+    Eff.quantile=quantile(d$hrs.trawld,probs=seq(0,1,.05))
+    Ef.seq=seq(min(round(d$hrs.trawld,1)),round(Eff.quantile[match("90%",names(Eff.quantile))],1),by=.1)
+    nd <- data.frame(Season = factor(rep(c("AuWin","SprSu"),each=length(Ef.seq)),levels=levels(d$Season)), 
+                     StartDate.yr=factor(names(rev(sort(table(d$StartDate.yr)))[1]),levels=levels(d$StartDate.yr)),
+                     VESSEL = factor(names(rev(sort(table(d$VESSEL)))[1]),levels=levels(d$VESSEL)),
+                     Day_night = factor(names(rev(sort(table(d$Day_night)))[1]),levels=levels(d$Day_night)),
+                     long = mean(d$long),
+                     TotalCatch = mean(d$TotalCatch),
+                     depth = mean(d$depth),
+                     hrs.trawld = rep(Ef.seq,2))
+    PREDS=predict(modl,nd,type='response',se.fit =T)
+    nd$pred=1-PREDS$fit
+    nd$SE=PREDS$se.fit
+    
+    Ymax=2*max(nd$pred+1.96*nd$SE)
+    with(subset(nd,Season=='AuWin'),plot(hrs.trawld,pred,ylab="",xlab="",axes=FALSE,pch=19,ylim=c(0,Ymax)))
+    with(subset(nd,Season=='AuWin'),segments(hrs.trawld,pred+1.96*SE,hrs.trawld,pred-1.96*SE))
+    with(subset(nd,Season=='SprSu'),points(hrs.trawld,pred,pch=19,col="grey60"))
+    with(subset(nd,Season=='SprSu'),segments(hrs.trawld,col="grey60",pred+1.96*SE,hrs.trawld,pred-1.96*SE))
+    
+    box()
+    Q=quantile(nd$pred)
+    axis(1,nd$hrs.trawld,F,tck=-0.015)
+    axis(1,seq(min(nd$hrs.trawld),max(nd$hrs.trawld),.2),F,tck=-0.03)
+    if(s==2) axis(1,seq(min(nd$hrs.trawld),max(nd$hrs.trawld),.2),seq(min(nd$hrs.trawld),max(nd$hrs.trawld),.2),tck=-0.03)  
+    axis(2,at=c(Q,Ymax*.5,Ymax),labels=c(round(Q,3),0.5,1))
+    axis.break(2,1.1*Q[length(Q)])
+    legend("topright",Species[s],bty='n',cex=1.25)
+    if(s==1) legend("topleft",c("Au-Wi","Sp-Su"),pch=19,col=c("black","grey60"),bty='n')
+    
+    
+    #Average seasonal effect
+    nd <- data.frame(Season = factor(c("AuWin","SprSu")), 
+                     VESSEL = factor(names(rev(sort(table(d$VESSEL)))[1]),levels=levels(d$VESSEL)),
+                     StartDate.yr=factor(names(rev(sort(table(d$StartDate.yr)))[1]),levels=levels(d$StartDate.yr)),
+                     Day_night = factor(names(rev(sort(table(d$Day_night)))[1]),levels=levels(d$Day_night)),
+                     long = mean(d$long),
+                     TotalCatch = mean(d$TotalCatch),
+                     depth = mean(d$depth),
+                     hrs.trawld = mean(d$hrs.trawld))
+    PREDS.average=predict(modl,nd,type='response',se.fit =T)
+    Avg.pred=paste(round(1-PREDS.average$fit,4),round(PREDS.average$se.fit,4),sep="?")
+    names(Avg.pred)=c("AuWin","SprSu")
+    return(Avg.pred)
+  }
+  Avg.prob.season=Model.out
+  fn.fig("Seasonal_effect",1600,2400)
+  smart.par(n.plots=length(Species),MAR=c(2,2,.1,1),OMA=c(1,2,.2,.2),MGP=c(2.5,.5,0))
+  par(las=1)
+  for(s in 1:length(Species)) Avg.prob.season[[s]]=fn.marg.eff(d=Model.out[[s]]$DATA,modl=FinalModel[[s]]$Modl)
+  mtext("Hours trawled",1,outer=T,cex=1.5,line=-.25)
+  mtext("Probability",2,outer=T,line=.5,las=3,cex=1.5)
+  dev.off()
   
-  lsm$SD=lsm$SE
+  write.csv(Avg.prob.season,"Avg.prob.season.csv")
   
-  return(lsm)
 }
-pred.fun(mod=FinalModel[[s]]$Modl,
-         biascor="NO",
-         PRED="Season")
-fn.marg.eff=function(d,modl)
+
+if(Fit.To=='Number') 
 {
-  #Season effect
-  Eff.quantile=quantile(d$hrs.trawld,probs=seq(0,1,.05))
-  Ef.seq=seq(min(round(d$hrs.trawld,1)),round(Eff.quantile[match("90%",names(Eff.quantile))],1),by=.1)
-  nd <- data.frame(Season = factor(rep(c("AuWin","SprSu"),each=length(Ef.seq)),levels=levels(d$Season)), 
-                   StartDate.yr=factor(names(rev(sort(table(d$StartDate.yr)))[1]),levels=levels(d$StartDate.yr)),
-                   VESSEL = factor(names(rev(sort(table(d$VESSEL)))[1]),levels=levels(d$VESSEL)),
-                   Day_night = factor(names(rev(sort(table(d$Day_night)))[1]),levels=levels(d$Day_night)),
-                   long = mean(d$long),
-                   TotalCatch = mean(d$TotalCatch),
-                   depth = mean(d$depth),
-                   hrs.trawld = rep(Ef.seq,2))
-  PREDS=predict(modl,nd,type='response',se.fit =T)
-  nd$pred=1-PREDS$fit
-  nd$SE=PREDS$se.fit
-  
-  Ymax=2*max(nd$pred+1.96*nd$SE)
-  with(subset(nd,Season=='AuWin'),plot(hrs.trawld,pred,ylab="",xlab="",axes=FALSE,pch=19,ylim=c(0,Ymax)))
-  with(subset(nd,Season=='AuWin'),segments(hrs.trawld,pred+1.96*SE,hrs.trawld,pred-1.96*SE))
-  with(subset(nd,Season=='SprSu'),points(hrs.trawld,pred,pch=19,col="grey60"))
-  with(subset(nd,Season=='SprSu'),segments(hrs.trawld,col="grey60",pred+1.96*SE,hrs.trawld,pred-1.96*SE))
-  
-  box()
-  Q=quantile(nd$pred)
-  axis(1,nd$hrs.trawld,F,tck=-0.015)
-  axis(1,seq(min(nd$hrs.trawld),max(nd$hrs.trawld),.2),F,tck=-0.03)
-  if(s==2) axis(1,seq(min(nd$hrs.trawld),max(nd$hrs.trawld),.2),seq(min(nd$hrs.trawld),max(nd$hrs.trawld),.2),tck=-0.03)  
-  axis(2,at=c(Q,Ymax*.5,Ymax),labels=c(round(Q,3),0.5,1))
-  axis.break(2,1.1*Q[length(Q)])
-  legend("topright",Species[s],bty='n',cex=1.25)
-  if(s==1) legend("topleft",c("Au-Wi","Sp-Su"),pch=19,col=c("black","grey60"),bty='n')
-  
-  
-  #Average seasonal effect
-  nd <- data.frame(Season = factor(c("AuWin","SprSu")), 
-                   VESSEL = factor(names(rev(sort(table(d$VESSEL)))[1]),levels=levels(d$VESSEL)),
-                   StartDate.yr=factor(names(rev(sort(table(d$StartDate.yr)))[1]),levels=levels(d$StartDate.yr)),
-                   Day_night = factor(names(rev(sort(table(d$Day_night)))[1]),levels=levels(d$Day_night)),
-                   long = mean(d$long),
-                   TotalCatch = mean(d$TotalCatch),
-                   depth = mean(d$depth),
-                   hrs.trawld = mean(d$hrs.trawld))
-  PREDS.average=predict(modl,nd,type='response',se.fit =T)
-  Avg.pred=paste(round(1-PREDS.average$fit,4),round(PREDS.average$se.fit,4),sep="?")
-  names(Avg.pred)=c("AuWin","SprSu")
-  return(Avg.pred)
+  #Bootstrap CI and predictions       #takes 65 secs per n.boot per species  
+  system.time({
+    
+    # stratified sampling with replacement
+    fn.boot=function(dd)   
+    {
+      s=strata(dd,c("StartDate.yr"),size=table(dd$StartDate.yr), method="srswr") 
+      boot.d=getdata(dd,s)
+      return(boot.d)
+    }
+    
+    # fit models to bootstrapped data
+    fit.model.boot=function(DAT,init.pars) 
+    {
+      Fit <- gam(list(Number ~ hrs.trawld,  #Poisson process
+                      ~ s(StartDate.mn,k=12,bs='cc')+hrs.trawld+StartDate.yr+s(long)+s(Start.hour,k=24,bs='cc')), #Probability
+                 data = DAT,
+                 family = ziplss,
+                 method = "REML",
+                 start=init.pars)
+      return(list(Fit=Fit))
+      #return(list(Fit=Fit,DAT=DAT))
+    }
+    
+    #Run boot in parallel
+    cores=detectCores()      #setup parallel backend to use many processors
+    cl <- makeCluster(cores[1]-1) #leave 1 core not to overload your computer
+    registerDoParallel(cl)
+    STORE.BOOT=vector('list',length(Species))
+    names(STORE.BOOT)=Species
+    for(i in 1:length(Species))   
+    {
+      #parallel processing
+      Store.boot=foreach(k=1:n.boot,.errorhandling='remove',.packages=c('sampling','mgcv')) %dopar%
+        {
+          mod=fit.model.boot(DAT=fn.boot(dd=Model.out[[i]]$DATA),init.pars=round(coef(Model.out[[i]]$GAM_ZIP),3))
+          return(mod)
+          rm(mod)
+        }
+      STORE.BOOT[[i]]=Store.boot
+    }
+    stopCluster(cl)  #stop cluster
+    
+    #Model predictions
+    fun.percentiles=function(d,var)
+    {
+      d1=d%>%
+        dplyr::select(all_of(var))%>%
+        mutate(MEAN=apply(d[,-1], 1, function(x) median(x, na.rm=T)),
+               SD=apply(d[,-1], 1, function(x) sd(x, na.rm=T)),
+               CV=100*SD/MEAN,
+               LOW=apply(d[,-1], 1, function(x) quantile(x, 0.025,na.rm=T)),
+               UP=apply(d[,-1], 1, function(x) quantile(x, 0.975,na.rm=T)))
+      return(d1)
+    }
+    STORE.BOOT.preds=vector('list',length(Species))
+    names(STORE.BOOT.preds)=Species
+    Pred.ZIP.GAM=function(MOD,d,Pred.term,BY)
+    {
+      #Create new data frame
+      d.vars=unique(unlist(lapply(formula(MOD)[1:2],all.vars))[-1])
+      add.this=d.vars[-match(Pred.term,d.vars)]
+      if(Pred.term%in%FACTORS) 
+      {
+        newd=data.frame(factor=levels(d[,Pred.term]))
+      }else
+      {
+        newd=d[,Pred.term]
+        newd=data.frame(seq(min(newd),max(newd),BY))
+      }
+      colnames(newd)=Pred.term 
+      add.dummy=data.frame(matrix(nrow=nrow(newd),ncol=length(add.this)))
+      colnames(add.dummy)=add.this
+      newd=cbind(newd,add.dummy)
+      for(ii in 1:length(add.this))
+      {
+        if(add.this[ii]%in%FACTORS)
+        {
+          newd[,add.this[ii]]=factor(names(sort(table(d[,add.this[ii]]))[1]),levels(d[,add.this[ii]]))
+        }else
+        {
+          newd[,add.this[ii]]= mean(d[,add.this[ii]])
+        }
+      }
+      
+      pred <- predict(MOD, newd, type = "link")
+      #head(pred) #The first column is the predicted value of the response from the Poisson part of the model
+      #      on the scale of the linear predictor (the log scale). 
+      # The second column is the predicted value from the zero-inflation component and is 
+      #     on the complementary log-log scale
+      
+      #Back transform to the respective response scales and then multiply together
+      ilink <- binomial(link = "cloglog")$linkinv
+      newd <- transform(newd, fitted = exp(pred[,1]) * ilink(pred[,2]))
+      return(newd)
+    }
+    for(i in 1:length(Species))   
+    {
+      #Year effect
+      Pred.StartDate.yr=vector('list',n.boot)
+      for(k in 1:n.boot)
+      {
+        out=Pred.ZIP.GAM(MOD=STORE.BOOT[[i]][[k]]$Fit,
+                         d=Model.out[[i]]$DATA,
+                         Pred.term="StartDate.yr",
+                         BY=NULL)
+        out=out[,c('StartDate.yr','fitted')]
+        names(out)[2]=paste("boot",k,sep='.')
+        Pred.StartDate.yr[[k]]=out  
+      }
+      Pred.StartDate.yr=do.call(cbind,Pred.StartDate.yr)
+      Pred.StartDate.yr=Pred.StartDate.yr[!duplicated(as.list(Pred.StartDate.yr))]
+      Pred.StartDate.yr=fun.percentiles(d=Pred.StartDate.yr,var='StartDate.yr')
+      
+      #Month effect
+      Pred.StartDate.mn=vector('list',n.boot)
+      for(k in 1:n.boot)
+      {
+        out=Pred.ZIP.GAM(MOD=STORE.BOOT[[i]][[k]]$Fit,
+                         d=Model.out[[i]]$DATA,
+                         Pred.term="StartDate.mn",
+                         BY=0.1)
+        out=out[,c('StartDate.mn','fitted')]
+        names(out)[2]=paste("boot",k,sep='.')
+        Pred.StartDate.mn[[k]]=out  
+      }
+      Pred.StartDate.mn=do.call(cbind,Pred.StartDate.mn)
+      Pred.StartDate.mn=Pred.StartDate.mn[!duplicated(as.list(Pred.StartDate.mn))]
+      Pred.StartDate.mn=fun.percentiles(d=Pred.StartDate.mn,var='StartDate.mn')
+      
+      #Longitudinal effect
+      Pred.long=vector('list',n.boot)
+      for(k in 1:n.boot)
+      {
+        out=Pred.ZIP.GAM(MOD=STORE.BOOT[[i]][[k]]$Fit,
+                         d=Model.out[[i]]$DATA,
+                         Pred.term="long",
+                         BY=0.1)
+        out=out[,c('long','fitted')]
+        names(out)[2]=paste("boot",k,sep='.')
+        Pred.long[[k]]=out  
+      }
+      Pred.long=do.call(cbind,Pred.long)
+      Pred.long=Pred.long[!duplicated(as.list(Pred.long))]
+      Pred.long=fun.percentiles(d=Pred.long,var='long')
+      
+      #Trawled hours
+      Pred.hrs.trawld=vector('list',n.boot)
+      for(k in 1:n.boot)
+      {
+        out=Pred.ZIP.GAM(MOD=STORE.BOOT[[i]][[k]]$Fit,
+                         d=Model.out[[i]]$DATA,
+                         Pred.term="hrs.trawld",
+                         BY=0.1)
+        out=out[,c('hrs.trawld','fitted')]
+        names(out)[2]=paste("boot",k,sep='.')
+        Pred.hrs.trawld[[k]]=out  
+      }
+      Pred.hrs.trawld=do.call(cbind,Pred.hrs.trawld)
+      Pred.hrs.trawld=Pred.hrs.trawld[!duplicated(as.list(Pred.hrs.trawld))]
+      Pred.hrs.trawld=fun.percentiles(d=Pred.hrs.trawld,var='hrs.trawld')
+      
+      STORE.BOOT.preds[[i]]=list(Pred.StartDate.yr=Pred.StartDate.yr,
+                                 Pred.StartDate.mn=Pred.StartDate.mn,
+                                 Pred.long=Pred.long,
+                                 Pred.hrs.trawld=Pred.hrs.trawld)
+    }
+    
+    #Plot median and CI
+    fn.relative=function(D)
+    {
+      Mn=mean(D$MEAN)
+      D$LOW=D$LOW/Mn
+      D$UP=D$UP/Mn
+      D$MEAN=D$MEAN/Mn
+      return(D)
+    }
+    CI.fun=function(x,LOW1,UP1,Colr,Colr2)
+    {
+      x.Vec <- c(x, tail(x, 1), rev(x), x[1]) 
+      y.Vec <- c(LOW1, tail(UP1, 1), rev(UP1), LOW1[1])
+      polygon(x.Vec, y.Vec, col = Colr, border = Colr2)
+    }
+    fn.trasn=function(x) rgb(t(col2rgb(x)), alpha=40, maxColorValue = 255)
+    fun.plot.pred=function(Narrow,Green,normalised,xlab)
+    {
+      if(normalised=="YES")
+      {
+        Narrow=fn.relative(Narrow)
+        Green=fn.relative(Green)
+      }
+      if(colnames(Narrow)[1]%in%FACTORS)  
+      {
+        yr=as.numeric(as.character(Narrow[,1]))
+        plot(yr,Narrow$MEAN,pch=19,main="",xlab="",ylab="",col=CL1,
+                          cex=1.25,cex.axis=1.25,ylim=c(0,max(c(Narrow$UP,Green$UP))))
+        suppressWarnings(with(Narrow,arrows(x0=yr, y0=LOW, x1=yr, y1=UP,col=CL1,code = 3,angle=90,length=.025)))
+        
+        points(yr+.25,Green$MEAN,pch=19,col=CL2)
+        suppressWarnings(with(Green,arrows(x0=yr+.25, y0=LOW, x1=yr+.25, y1=UP,col=CL2,code = 3,angle=90,length=.025)))
+      }else
+      {
+        plot(Narrow[,1],Narrow$MEAN,type='l',main="",xlab="",ylab="",col=CL1,
+             lwd=2,cex.axis=1.25,ylim=c(0,max(c(Narrow$UP,Green$UP))))
+        CI.fun(x=Narrow[,1],LOW1=Narrow$LOW,UP1=Narrow$UP,Colr=fn.trasn(CL1),Colr2="transparent")
+        CI.fun(x=Green[,1],LOW1=Green$LOW,UP1=Green$UP,Colr=fn.trasn(CL2),Colr2="transparent")
+        lines(Narrow[,1],Narrow$MEAN,type='l',lwd=2,col=CL1)
+        lines(Green[,1],Green$MEAN,type='l',lwd=2,col=CL2)
+        
+      }
+      mtext(xlab,1,line=2.2,cex=1.15)
+    }
+    XLAB=c('Financial year',"Month",expression(paste("Longitude (",degree,"E)",sep="")),"Effort (trawled hours)")
+    
+    fn.fig("Figure 3",1600,2400)
+    par(mfrow=c(4,1),mai=c(.3,.38,.175,.1),oma=c(2,1.25,.1,.1),las=1,mgp=c(.04,.6,0))
+    for(i in 1:length(XLAB))
+    {
+      fun.plot.pred(Narrow=STORE.BOOT.preds$SawfishNarrow[[i]],
+                    Green=STORE.BOOT.preds$SawfishGreen[[i]],
+                    normalised="YES",
+                    xlab=XLAB[i])
+      if(i==1) legend("topleft",c("Narrow sawfish","Green sawfish"),text.col=c(CL1,CL2),bty='n',cex=1.5)
+      
+    }
+    mtext("Relative catch rate",2,outer=T,las=3,cex=1.25,line=-.25)
+    dev.off()
+    
+    
+    #Export annual catch rates
+    OUT=STORE.BOOT.preds$SawfishNarrow$Pred.StartDate.yr%>%
+      rename(FINYEAR=StartDate.yr)
+    write.csv(OUT,'C:/Matias/Analyses/Data_outs/Narrow sawfish/CPUE_Pilbara.trawl.csv',row.names = F)
+    OUT=STORE.BOOT.preds$SawfishGreen$Pred.StartDate.yr%>%
+      rename(FINYEAR=StartDate.yr)
+    write.csv(OUT,'C:/Matias/Analyses/Data_outs/Green sawfish/CPUE_Pilbara.trawl.csv',row.names = F)
+    
+  })
 }
-Avg.prob.season=Model.out
-fn.fig("Seasonal_effect",1600,2400)
-smart.par(n.plots=length(Species),MAR=c(2,2,.1,1),OMA=c(1,2,.2,.2),MGP=c(2.5,.5,0))
-par(las=1)
-for(s in 1:length(Species)) Avg.prob.season[[s]]=fn.marg.eff(d=Model.out[[s]]$DATA,modl=FinalModel[[s]]$Modl)
-mtext("Hours trawled",1,outer=T,cex=1.5,line=-.25)
-mtext("Probability",2,outer=T,line=.5,las=3,cex=1.5)
-dev.off()
 
-write.csv(Avg.prob.season,"Avg.prob.season.csv")
+#-- Export Anova table  
+if(Fit.To=='Occurrence')
+{
+  NMS=colnames(FinalModel$SawfishNarrow$Anova.tab)
+  TABL.Anova=cbind(FinalModel$SawfishNarrow$Anova.tab,FinalModel$SawfishGreen$Anova.tab)
+  colnames(TABL.Anova)=c(paste("SawfishNarrow",NMS,sep="_"),
+                         paste("SawfishGreen",NMS,sep="_"))
+  
+  NMS=colnames(FinalModel$SawfishNarrow$COEFS)
+  TABL.COEF=cbind(FinalModel$SawfishNarrow$COEFS,FinalModel$SawfishGreen$COEFS)
+  colnames(TABL.COEF)=c(paste("SawfishNarrow",NMS,sep="_"),
+                        paste("SawfishGreen",NMS,sep="_")) 
+}
 
-#-- Export Anova table
-NMS=colnames(FinalModel$SawfishNarrow$Anova.tab)
-TABL.Anova=cbind(FinalModel$SawfishNarrow$Anova.tab,FinalModel$SawfishGreen$Anova.tab)
-colnames(TABL.Anova)=c(paste("SawfishNarrow",NMS,sep="_"),
-                       paste("SawfishGreen",NMS,sep="_"))
-
-NMS=colnames(FinalModel$SawfishNarrow$COEFS)
-TABL.COEF=cbind(FinalModel$SawfishNarrow$COEFS,FinalModel$SawfishGreen$COEFS)
-colnames(TABL.COEF)=c(paste("SawfishNarrow",NMS,sep="_"),
-                       paste("SawfishGreen",NMS,sep="_"))
+if(Fit.To=='Number') 
+{
+  Anova.tab=function(mod,Fcol)  
+  {
+    ANVA=anova.gam(mod)
+    Param=ANVA$pTerms.table
+    Non.param=ANVA$s.table
+    Tab=rbind(Param[,match(c(Fcol,"p-value"),colnames(Param))],
+              Non.param[,match(c(Fcol,"p-value"),colnames(Non.param))])
+    row.names(Tab)=NULL
+    Tab=cbind(data.frame(Term=tolower(c(row.names(Param), row.names(Non.param)))),
+              as.data.frame(Tab))
+    Tab=Tab%>%rename(p=`p-value`)%>%mutate(p=ifelse(p<0.001,"<0.001",round(p,3)))
+    id=match(Fcol,names(Tab))
+    Tab[,id]=round(Tab[,id],3)
+    dummy=Tab[1,]
+    dummy[,]=""
+    SP=dummy
+    SP$Term=names(Species)[i]
+    Dev.Exp=dummy
+    Dev.Exp$Term="Dev.exp"
+    Dev.Exp[,id]=paste(round(ANVA$dev.expl,2)*100,"%",sep="")
+    Tab=rbind(SP,Tab,Dev.Exp)
+    Tab$Term[which(grepl("hrs.trawld",Tab$Term))]="Trawled hours"
+    Tab$Term[which(grepl("hrs.trawld.1",Tab$Term))]="Prob. Trawled hours"
+    Tab$Term[which(grepl("startdate.yr.1",Tab$Term))]="Prob. Year"
+    Tab$Term[which(grepl("s.1(startdate.mn)",Tab$Term))]="Prob. Month"
+    Tab$Term[which(grepl("s.1(long)",Tab$Term))]="Prob. Longitude"
+    Tab$Term[which(grepl("s.1(start.hour)",Tab$Term))]="Prob. Hour"
+    Tab$Term[which(grepl("Dev.exp",Tab$Term))]="Deviance explained"
+    return(Tab)
+  }
+  ANOV.TAB=vector('list',length(Species)) 
+  for (i in 1:length(Species))  ANOV.TAB[[i]]=Anova.tab(mod=Model.out[[i]]$GAM_ZIP,Fcol="Chi.sq")
+  TABL.Anova=do.call(rbind,ANOV.TAB)
+  
+  TABL.COEF=cbind(coef(Model.out$SawfishNarrow$GAM_ZIP),
+                  coef(Model.out$SawfishGreen$GAM_ZIP))
+}
 
 write.csv(TABL.Anova,"Anova.csv",row.names=T)
 write.csv(TABL.COEF,"COEF.csv",row.names=T)
+
+#MISSING:
+##Checking GAM fit#######################
+if(check.GAM=="YES")
+{
+  fn.need.Gam=function(MOD,DAT,VAR,Var.name)
+  {
+    E1=resid(MOD,type='pearson')
+    plot(VAR,E1,ylab='',xlab=Var.name)
+    lo <- loess(E1~VAR)
+    lines(predict(lo), col='red', lwd=2)
+    
+    tmp=gam(E1~s(VAR),data=DAT)
+    return(anova(tmp))
+  }
+  
+  #note: if anova is Significant, then there's a pattern in residuals (ie non-linear relation
+  #       between covariate and response var)
+  fn.fig(paste(hndl.expl,"/Need_gam_plot",sep=""),2400,1200)
+  par(mfcol=c(2,length(Species.cpue)),las=1,mar=c(2.5,.5,.5,.75),oma=c(1,2.25,1,.1),mgp=c(1.5,0.6,0))
+  STORE.GAM=vector('list',N.species)
+  names(STORE.GAM)=names(Store)
+  for(i in Species.cpue)
+  {
+    MoD=Store[[i]]$Fit
+    DAt=Store[[i]]$DAT
+    ths=c("BOTDEPTH","Mid.Lat")
+    id=match(ths,names(DAt))
+    Store.Gam=vector('list',length(ths))
+    names(Store.Gam)=ths
+    for(x in 1:length(id))
+    {
+      Store.Gam[[x]]=fn.need.Gam(MoD,DAt,DAt[,id[x]],ths[x])
+      if(x==1)mtext(names(Store)[i],3,line=0,cex=.65)
+      legend('topright',paste("F=",round(Store.Gam[[x]]$s.table[,3],2),
+                              "; p-value=",round(Store.Gam[[x]]$s.table[,4],2)),bty='n',cex=.65)
+    }
+    STORE.GAM[[i]]=Store.Gam
+  }
+  mtext("Pearson residuals",2,outer=T,las=3,line=0.5,cex=1.25)
+  dev.off()
+  
+  #1.11.14. Fitting GAM and ZIGAM
+  # 
+  #   #Formulas
+  #   
+  #   #Count model
+  #   pois.GAM=gam(Catch.Target ~ year s(BOTDEPTH)+ offset(log.Effort), family = poisson, data=DAT)
+  #   NB.GAM=gam(Catch.Target ~ year s(BOTDEPTH)+ offset(log.Effort), family = negbin(NB$theta), data=DAT)
+  #   
+  #   #Zero inflated (see page 84-86 Zuur, how to get deviance)
+  #   library(VGAM) 
+  #   detach("package:mgcv")
+  #   ZI.pois.GAM=vgam(Catch.Target ~ year +s(BOTDEPTH)+ offset(log.Effort), family = zipoisson, data=DAT)
+  #   ZI.NB.GAM=vgam(Catch.Target ~ year +s(BOTDEPTH)+ offset(log.Effort), family = zinegbinomial, data=DAT,
+  #                  control=vgam.control(maxit=100,epsilon=1e-4))
+  
+}
+
+
+##compare fitted model to null model to test if it's an improvement
+Ch.sq=ERROR.st
+for(i in Species.cpue) Ch.sq[[i]]=pchisq(2 * (logLik(Store[[i]]$Fit) - logLik(Store[[i]]$Null)), df = 3, lower.tail = FALSE)
+
+#rootgram
+fn.fig(paste(getwd(),"/Model selection/rootgram_abundance",sep=""),2000,2400)
+smart.par(n.plots=length(Species.cpue),MAR=c(2,2,1,1),OMA=c(1,1.5,.1,.1),MGP=c(2.5,.7,0))
+for(i in Species.cpue) rootogram(Store[[i]]$Fit, main = TARGETS.name[i])
+dev.off()
+
+#Anova tables    
+Anova.tab=function(mod,Fcol)  
+{
+  ANVA=anova.gam(mod)
+  Param=ANVA$pTerms.table
+  Non.param=ANVA$s.table
+  Tab=rbind(Param[,match(c(Fcol,"p-value"),colnames(Param))],
+            Non.param[,match(c(Fcol,"p-value"),colnames(Non.param))])
+  row.names(Tab)=NULL
+  Tab=cbind(data.frame(Term=tolower(c(row.names(Param), row.names(Non.param)))),
+            as.data.frame(Tab))
+  Tab=Tab%>%rename(p=`p-value`)%>%mutate(p=ifelse(p<0.001,"<0.001",round(p,3)))
+  id=match(Fcol,names(Tab))
+  Tab[,id]=round(Tab[,id],3)
+  dummy=Tab[1,]
+  dummy[,]=""
+  SP=dummy
+  SP$Term=TARGETS.name[i]
+  Dev.Exp=dummy
+  Dev.Exp$Term="Dev.exp"
+  Dev.Exp[,id]=paste(round(ANVA$dev.expl,2)*100,"%",sep="")
+  Tab=rbind(SP,Tab,Dev.Exp)
+  Tab$Term[which(grepl("mid.lat",Tab$Term))]="latitude"
+  Tab$Term[which(grepl("botdepth",Tab$Term))]="bottom depth"
+  Tab$Term[which(grepl("Dev.exp",Tab$Term))]="Deviance explained"
+  Tab$Join=with(Tab,paste(TARGETS.name[i],Tab$Term,sep="_"))
+  
+  return(Tab)
+}
+
+
+#Get terms significance and coefficients 
+Sig.terms=vector('list',N.species)
+names(Sig.terms)=TARGETS.name
+Sig.term.coeff=Sig.terms
+for (i in 1:N.species)
+{
+  a=as.data.frame.matrix(coeftest(Store[[i]]$Fit))
+  write.csv(a,paste("Paper/Anovas/Anova.abundance_",names(Store)[i],".csv",sep=""),row.names=T)
+  
+  id=match('Pr(>|z|)',names(a))
+  if(length(id)>0) names(a)[id]='Pr(>|t|)'
+  
+  Sigi=rownames(a[which(a$`Pr(>|t|)`<0.05),])
+  Sigi=Sigi[!grepl("\\bIntercept\\b",Sigi)]
+  Sigi=Sigi[!grepl('year',Sigi)]
+  Sigi.count=sapply(Sigi[grepl('count',Sigi)], function(x) substr(x,7,30))
+  Sigi.zero=sapply(Sigi[grepl('zero',Sigi)], function(x) substr(x,6,30))
+  if(ERROR.st[[i]]%in%c("Pois","NB")) Sigi.count=Sigi
+  Sig.terms[[i]]=list(Sigi.count=Sigi.count,Sigi.zero=Sigi.zero)
+  
+  dd=a$`Pr(>|t|)`[match(Sigi,row.names(a))]
+  names(dd)=Sigi
+  if(!ERROR.st[[i]]%in%c("Pois","NB")) 
+  {
+    Sigi.count=dd[grepl('count',names(dd))]
+    names(Sigi.count)=sapply( names(Sigi.count)[grepl('count', names(Sigi.count))], function(x) substr(x,7,30))
+    Sigi.zero=dd[grepl('zero',names(dd))]
+    names(Sigi.zero)=sapply( names(Sigi.zero)[grepl('zero', names(Sigi.zero))], function(x) substr(x,6,30))
+    Sig.term.coeff[[i]]=list(Sigi.count=Sigi.count,Sigi.zero=Sigi.zero)
+  }
+  if(ERROR.st[[i]]%in%c("Pois","NB")) Sig.term.coeff[[i]]=list(Sigi.count=dd,Sigi.zero=NULL)
+  
+}
 
 
 
