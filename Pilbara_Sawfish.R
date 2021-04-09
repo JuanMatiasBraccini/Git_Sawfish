@@ -52,7 +52,7 @@ Current.year=2020 #last year with complete data
 do.effort.cut="NO"  #if cutting effort at different levels
 Fit.To="Number"
 
-n.boot=100      #bootstrap zero inflated CI
+n.boot=1000      #bootstrap zero inflated CI
 set.seed(666) 
 
 # Data manipulation-------------------------------------------------------------------------
@@ -999,7 +999,8 @@ Model.out=vector('list',length(Species))
 names(Model.out)=Species
 Best.MDL=FinalModel=Model.out
 FORMULA=formula(Occurrence~StartDate.yr + Season + VESSEL + Day_night  + 
-                  long + depth + offset(hrs.trawld))
+                                         long + depth + offset(hrs.trawld))
+
 
 fn.models=function(species,METRIC,Formula,scaled.d,fit.to)
 {
@@ -1007,10 +1008,16 @@ fn.models=function(species,METRIC,Formula,scaled.d,fit.to)
   if(scaled.d=="NO")  d=Model.d[,c(species,TERMS)]
   if(scaled.d=="YES") d=Model.d.scaled[,c(species,TERMS)]
   
-  #2. Set character variables to factors
+  #2. Subset data set
+  d=d%>%filter(depth<200)   #remove depth outliers
+  TA=table(d$VESSEL,d$StartDate.yr)   #select vessels with records for 5 years or more
+  TA[TA>0]=1
+  d=d%>%filter(VESSEL%in%names(which(rowSums(TA)>5)))
+  
+  #3. Set character variables to factors
   d[FACTORS] <- lapply(d[FACTORS], factor)
   
-  #3. Define presence/absence response variable
+  #4. Define presence/absence response variable
   d=d%>%
     mutate(Number=get(species),
            Occurrence=ifelse(Number>0,1,0),
@@ -1018,7 +1025,6 @@ fn.models=function(species,METRIC,Formula,scaled.d,fit.to)
                              levels=c("yes","no")))%>% #have presence as first levels
     dplyr::select(-all_of(species))
   
-  d=d%>%filter(depth<200)
   #weight   
   # d$hrs.trawld.bin=cut(d$hrs.trawld,breaks=seq(0,round(max(d$hrs.trawld)),.5))#30 min bins (the way the fishers operate)
   # Tab.weight=as.matrix(table(d$hrs.trawld.bin))
@@ -1026,9 +1032,9 @@ fn.models=function(species,METRIC,Formula,scaled.d,fit.to)
   # d=merge(d,Tab.weight,by="hrs.trawld.bin")
   
   
-  #6. Fit models
+  #5. Fit models
   
-  #6.1 Probability of capture only
+  #5.1 Probability of capture only
   if(fit.to=='Occurrence') 
   {
     #Data partition
@@ -1088,7 +1094,7 @@ fn.models=function(species,METRIC,Formula,scaled.d,fit.to)
                 Brglm=Brglm,GBM=fit.gbm,GBM.smote=fit.gbm.smote))
   }
   
-  #6.2 Zero inflated numbers
+  #5.2 Zero inflated numbers
   if(fit.to=='Number') 
   {
     #Smote data
@@ -1140,13 +1146,13 @@ fn.models=function(species,METRIC,Formula,scaled.d,fit.to)
     }
     
     #Zero inflated Poisson
-    GAM_ZIP <- gam(list(Number ~ hrs.trawld,  #Poisson process
-                        ~ s(StartDate.mn,k=12,bs='cc')+hrs.trawld+StartDate.yr+s(long)+s(Start.hour,k=24,bs='cc')), #Probability
+    GAM_ZIP <- gam(list(Number ~ 1,                                                 #Poisson process (intercept only as when possitive, it's mostly 1 individual)
+                        ~ s(StartDate.mn,k=12,bs='cc')+hrs.trawld+StartDate.yr+     #Probability
+                          s(long)+VESSEL),  
                    data = d,
                    family = ziplss,
                    method = "REML")
-    
-    
+
     return(list(DATA=d,GAM_ZIP=GAM_ZIP,GAM_Pois=GAM_Pois,GAM_NB=GAM_NB))
   }
   
@@ -1260,6 +1266,7 @@ if(Fit.To=='Occurrence')
 
 #-- Figure 1. map
 do.map=FALSE
+dot.col="dodgerblue4"
 if(do.map)
 {
   add.depth="NO"
@@ -1273,7 +1280,7 @@ if(do.map)
     ybat=sort(unique(Bathymetry$V2))
     reshaped=as.matrix(reshape(Bathymetry,idvar="V1",timevar="V2",v.names="V3", direction="wide"))
   }
-  CL1='black'
+ # CL1='black'
   CL1='color'
   if(CL1=="color")Colfunc <- colorRampPalette(c("yellow","red"))
   if(CL1=="black")Colfunc <- colorRampPalette(c("grey90","grey10"))
@@ -1325,7 +1332,7 @@ if(do.map)
     if(CL1=="color")
     {
       Col='white'
-      Bg='forestgreen'
+      Bg=dot.col
     }
     with(a,points(SLONG,SLAT,pch=21,col=Col,bg=Bg,cex=1.2))
     legend("topleft",names(species),cex=1.25,bty="n")
@@ -1345,7 +1352,6 @@ if(do.map)
   library(PBSmapping)
   data(worldLLhigh)
   par(fig=c(0.575,0.975,.05,0.225), new = T,mgp=c(1,.5,0),las=1)
-  #par(fig=c(0.575,0.975,.15,0.45), new = T,mgp=c(1,.5,0),las=1)
   plotMap(worldLLhigh, xlim=c(113,155),ylim=c(-44.5,-11),plt = c(.1, 1, 0.075, 1),
           col="grey30",tck = 0.025, tckMinor = 0.0125, xlab="",ylab="",axes=F)
   box(lwd=2)
@@ -1358,7 +1364,7 @@ if(do.map)
 #-- Figure 2 Barplot of interactions 
 second.axis="darkgreen"
 third.axis="brown4"
-barcol="lightgoldenrod3"
+barcol='darkgoldenrod3'
 fn.2=function(species,what)
 {
   id=match(species,names(Data))
@@ -1643,7 +1649,7 @@ if(Fit.To=='Occurrence')
 
 if(Fit.To=='Number') 
 {
-  #Bootstrap CI and predictions       #takes 65 secs per n.boot per species  
+  #Bootstrap CI and predictions       #takes 40 secs per n.boot per species  
   system.time({
     
     # stratified sampling with replacement
@@ -1657,8 +1663,9 @@ if(Fit.To=='Number')
     # fit models to bootstrapped data
     fit.model.boot=function(DAT,init.pars) 
     {
-      Fit <- gam(list(Number ~ hrs.trawld,  #Poisson process
-                      ~ s(StartDate.mn,k=12,bs='cc')+hrs.trawld+StartDate.yr+s(long)+s(Start.hour,k=24,bs='cc')), #Probability
+      Fit <- gam(list(Number ~ 1,                                                 #Poisson process (intercept only as when possitive, it's mostly 1 individual)
+                      ~ s(StartDate.mn,k=12,bs='cc')+hrs.trawld+StartDate.yr+     #Probability
+                        s(long)+VESSEL), 
                  data = DAT,
                  family = ziplss,
                  method = "REML",
@@ -1756,6 +1763,22 @@ if(Fit.To=='Number')
       Pred.StartDate.yr=do.call(cbind,Pred.StartDate.yr)
       Pred.StartDate.yr=Pred.StartDate.yr[!duplicated(as.list(Pred.StartDate.yr))]
       Pred.StartDate.yr=fun.percentiles(d=Pred.StartDate.yr,var='StartDate.yr')
+      
+      #Vessel effect
+      # Pred.vessel=vector('list',n.boot)
+      # for(k in 1:n.boot)
+      # {
+      #   out=Pred.ZIP.GAM(MOD=STORE.BOOT[[i]][[k]]$Fit,
+      #                    d=Model.out[[i]]$DATA,
+      #                    Pred.term="VESSEL",
+      #                    BY=NULL)
+      #   out=out[,c('VESSEL','fitted')]
+      #   names(out)[2]=paste("boot",k,sep='.')
+      #   Pred.vessel[[k]]=out  
+      # }
+      # Pred.vessel=do.call(cbind,Pred.vessel)
+      # Pred.vessel=Pred.vessel[!duplicated(as.list(Pred.vessel))]
+      # Pred.vessel=fun.percentiles(d=Pred.vessel,var='VESSEL')
       
       #Month effect
       Pred.StartDate.mn=vector('list',n.boot)
@@ -1857,7 +1880,7 @@ if(Fit.To=='Number')
     }
     XLAB=c('Financial year',"Month",expression(paste("Longitude (",degree,"E)",sep="")),"Effort (trawled hours)")
     
-    fn.fig("Figure 3",1600,2400)
+    fn.fig("Figure 3_relative",1600,2400)
     par(mfrow=c(4,1),mai=c(.3,.38,.175,.1),oma=c(2,1.25,.1,.1),las=1,mgp=c(.04,.6,0))
     for(i in 1:length(XLAB))
     {
@@ -1868,9 +1891,23 @@ if(Fit.To=='Number')
       if(i==1) legend("topleft",c("Narrow sawfish","Green sawfish"),text.col=c(CL1,CL2),bty='n',cex=1.5)
       
     }
-    mtext("Relative catch rate",2,outer=T,las=3,cex=1.25,line=-.25)
+    mtext("Relative catch",2,outer=T,las=3,cex=1.25,line=-.25)
     dev.off()
     
+    fn.fig("Figure 3_absolute",1600,2400)
+    par(mfrow=c(4,1),mai=c(.3,.6,.175,.1),oma=c(2,1.25,.1,.1),las=1,mgp=c(.04,.6,0))
+    for(i in 1:length(XLAB))
+    {
+      fun.plot.pred(Narrow=STORE.BOOT.preds$SawfishNarrow[[i]],
+                    Green=STORE.BOOT.preds$SawfishGreen[[i]],
+                    normalised="NO",
+                    xlab=XLAB[i])
+      if(i==1) legend("topleft",c("Narrow sawfish","Green sawfish"),text.col=c(CL1,CL2),bty='n',cex=1.5)
+      
+    }
+    mtext("                                   Numbers caught per trawled hour",2,outer=T,las=3,cex=1.25,line=-.25)
+    mtext("Numbers caught",2,line=4.2,las=3,cex=1.25)
+    dev.off()
     
     #Export annual catch rates
     OUT=STORE.BOOT.preds$SawfishNarrow$Pred.StartDate.yr%>%
@@ -1920,13 +1957,13 @@ if(Fit.To=='Number')
     Dev.Exp$Term="Dev.exp"
     Dev.Exp[,id]=paste(round(ANVA$dev.expl,2)*100,"%",sep="")
     Tab=rbind(SP,Tab,Dev.Exp)
-    Tab$Term[which(grepl("hrs.trawld",Tab$Term))]="Trawled hours"
-    Tab$Term[which(grepl("hrs.trawld.1",Tab$Term))]="Prob. Trawled hours"
-    Tab$Term[which(grepl("startdate.yr.1",Tab$Term))]="Prob. Year"
-    Tab$Term[which(grepl("s.1(startdate.mn)",Tab$Term))]="Prob. Month"
-    Tab$Term[which(grepl("s.1(long)",Tab$Term))]="Prob. Longitude"
-    Tab$Term[which(grepl("s.1(start.hour)",Tab$Term))]="Prob. Hour"
-    Tab$Term[which(grepl("Dev.exp",Tab$Term))]="Deviance explained"
+    Tab$Term[match("hrs.trawld",Tab$Term)]="Trawled hours"
+    Tab$Term[match("hrs.trawld.1",Tab$Term)]="Prob. Trawled hours"
+    Tab$Term[match("startdate.yr.1",Tab$Term)]="Prob. Year"
+    Tab$Term[match("s.1(startdate.mn)",Tab$Term)]="Prob. Month"
+    Tab$Term[match("s.1(long)",Tab$Term)]="Prob. Longitude"
+    Tab$Term[match("s.1(start.hour)",Tab$Term)]="Prob. Hour"
+    Tab$Term[match("Dev.exp",Tab$Term)]="Deviance explained"
     return(Tab)
   }
   ANOV.TAB=vector('list',length(Species)) 
@@ -1939,143 +1976,6 @@ if(Fit.To=='Number')
 
 write.csv(TABL.Anova,"Anova.csv",row.names=T)
 write.csv(TABL.COEF,"COEF.csv",row.names=T)
-
-#MISSING:
-##Checking GAM fit#######################
-if(check.GAM=="YES")
-{
-  fn.need.Gam=function(MOD,DAT,VAR,Var.name)
-  {
-    E1=resid(MOD,type='pearson')
-    plot(VAR,E1,ylab='',xlab=Var.name)
-    lo <- loess(E1~VAR)
-    lines(predict(lo), col='red', lwd=2)
-    
-    tmp=gam(E1~s(VAR),data=DAT)
-    return(anova(tmp))
-  }
-  
-  #note: if anova is Significant, then there's a pattern in residuals (ie non-linear relation
-  #       between covariate and response var)
-  fn.fig(paste(hndl.expl,"/Need_gam_plot",sep=""),2400,1200)
-  par(mfcol=c(2,length(Species.cpue)),las=1,mar=c(2.5,.5,.5,.75),oma=c(1,2.25,1,.1),mgp=c(1.5,0.6,0))
-  STORE.GAM=vector('list',N.species)
-  names(STORE.GAM)=names(Store)
-  for(i in Species.cpue)
-  {
-    MoD=Store[[i]]$Fit
-    DAt=Store[[i]]$DAT
-    ths=c("BOTDEPTH","Mid.Lat")
-    id=match(ths,names(DAt))
-    Store.Gam=vector('list',length(ths))
-    names(Store.Gam)=ths
-    for(x in 1:length(id))
-    {
-      Store.Gam[[x]]=fn.need.Gam(MoD,DAt,DAt[,id[x]],ths[x])
-      if(x==1)mtext(names(Store)[i],3,line=0,cex=.65)
-      legend('topright',paste("F=",round(Store.Gam[[x]]$s.table[,3],2),
-                              "; p-value=",round(Store.Gam[[x]]$s.table[,4],2)),bty='n',cex=.65)
-    }
-    STORE.GAM[[i]]=Store.Gam
-  }
-  mtext("Pearson residuals",2,outer=T,las=3,line=0.5,cex=1.25)
-  dev.off()
-  
-  #1.11.14. Fitting GAM and ZIGAM
-  # 
-  #   #Formulas
-  #   
-  #   #Count model
-  #   pois.GAM=gam(Catch.Target ~ year s(BOTDEPTH)+ offset(log.Effort), family = poisson, data=DAT)
-  #   NB.GAM=gam(Catch.Target ~ year s(BOTDEPTH)+ offset(log.Effort), family = negbin(NB$theta), data=DAT)
-  #   
-  #   #Zero inflated (see page 84-86 Zuur, how to get deviance)
-  #   library(VGAM) 
-  #   detach("package:mgcv")
-  #   ZI.pois.GAM=vgam(Catch.Target ~ year +s(BOTDEPTH)+ offset(log.Effort), family = zipoisson, data=DAT)
-  #   ZI.NB.GAM=vgam(Catch.Target ~ year +s(BOTDEPTH)+ offset(log.Effort), family = zinegbinomial, data=DAT,
-  #                  control=vgam.control(maxit=100,epsilon=1e-4))
-  
-}
-
-
-##compare fitted model to null model to test if it's an improvement
-Ch.sq=ERROR.st
-for(i in Species.cpue) Ch.sq[[i]]=pchisq(2 * (logLik(Store[[i]]$Fit) - logLik(Store[[i]]$Null)), df = 3, lower.tail = FALSE)
-
-#rootgram
-fn.fig(paste(getwd(),"/Model selection/rootgram_abundance",sep=""),2000,2400)
-smart.par(n.plots=length(Species.cpue),MAR=c(2,2,1,1),OMA=c(1,1.5,.1,.1),MGP=c(2.5,.7,0))
-for(i in Species.cpue) rootogram(Store[[i]]$Fit, main = TARGETS.name[i])
-dev.off()
-
-#Anova tables    
-Anova.tab=function(mod,Fcol)  
-{
-  ANVA=anova.gam(mod)
-  Param=ANVA$pTerms.table
-  Non.param=ANVA$s.table
-  Tab=rbind(Param[,match(c(Fcol,"p-value"),colnames(Param))],
-            Non.param[,match(c(Fcol,"p-value"),colnames(Non.param))])
-  row.names(Tab)=NULL
-  Tab=cbind(data.frame(Term=tolower(c(row.names(Param), row.names(Non.param)))),
-            as.data.frame(Tab))
-  Tab=Tab%>%rename(p=`p-value`)%>%mutate(p=ifelse(p<0.001,"<0.001",round(p,3)))
-  id=match(Fcol,names(Tab))
-  Tab[,id]=round(Tab[,id],3)
-  dummy=Tab[1,]
-  dummy[,]=""
-  SP=dummy
-  SP$Term=TARGETS.name[i]
-  Dev.Exp=dummy
-  Dev.Exp$Term="Dev.exp"
-  Dev.Exp[,id]=paste(round(ANVA$dev.expl,2)*100,"%",sep="")
-  Tab=rbind(SP,Tab,Dev.Exp)
-  Tab$Term[which(grepl("mid.lat",Tab$Term))]="latitude"
-  Tab$Term[which(grepl("botdepth",Tab$Term))]="bottom depth"
-  Tab$Term[which(grepl("Dev.exp",Tab$Term))]="Deviance explained"
-  Tab$Join=with(Tab,paste(TARGETS.name[i],Tab$Term,sep="_"))
-  
-  return(Tab)
-}
-
-
-#Get terms significance and coefficients 
-Sig.terms=vector('list',N.species)
-names(Sig.terms)=TARGETS.name
-Sig.term.coeff=Sig.terms
-for (i in 1:N.species)
-{
-  a=as.data.frame.matrix(coeftest(Store[[i]]$Fit))
-  write.csv(a,paste("Paper/Anovas/Anova.abundance_",names(Store)[i],".csv",sep=""),row.names=T)
-  
-  id=match('Pr(>|z|)',names(a))
-  if(length(id)>0) names(a)[id]='Pr(>|t|)'
-  
-  Sigi=rownames(a[which(a$`Pr(>|t|)`<0.05),])
-  Sigi=Sigi[!grepl("\\bIntercept\\b",Sigi)]
-  Sigi=Sigi[!grepl('year',Sigi)]
-  Sigi.count=sapply(Sigi[grepl('count',Sigi)], function(x) substr(x,7,30))
-  Sigi.zero=sapply(Sigi[grepl('zero',Sigi)], function(x) substr(x,6,30))
-  if(ERROR.st[[i]]%in%c("Pois","NB")) Sigi.count=Sigi
-  Sig.terms[[i]]=list(Sigi.count=Sigi.count,Sigi.zero=Sigi.zero)
-  
-  dd=a$`Pr(>|t|)`[match(Sigi,row.names(a))]
-  names(dd)=Sigi
-  if(!ERROR.st[[i]]%in%c("Pois","NB")) 
-  {
-    Sigi.count=dd[grepl('count',names(dd))]
-    names(Sigi.count)=sapply( names(Sigi.count)[grepl('count', names(Sigi.count))], function(x) substr(x,7,30))
-    Sigi.zero=dd[grepl('zero',names(dd))]
-    names(Sigi.zero)=sapply( names(Sigi.zero)[grepl('zero', names(Sigi.zero))], function(x) substr(x,6,30))
-    Sig.term.coeff[[i]]=list(Sigi.count=Sigi.count,Sigi.zero=Sigi.zero)
-  }
-  if(ERROR.st[[i]]%in%c("Pois","NB")) Sig.term.coeff[[i]]=list(Sigi.count=dd,Sigi.zero=NULL)
-  
-}
-
-
-
 
 # NOTE used-------------------------------------------------------------------------
 NOT.used="NO"
