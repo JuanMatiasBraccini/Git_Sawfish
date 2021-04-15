@@ -52,7 +52,9 @@ Current.year=2020 #last year with complete data
 do.effort.cut="NO"  #if cutting effort at different levels
 Fit.To="Number"
 
-n.boot=1000      #bootstrap zero inflated CI
+do.asymptotic.error=TRUE
+do.boot=FALSE   #takes waaay too long
+n.boot=100      #bootstrap zero inflated CI
 set.seed(666) 
 
 # Data manipulation-------------------------------------------------------------------------
@@ -1649,64 +1651,12 @@ if(Fit.To=='Occurrence')
 
 if(Fit.To=='Number') 
 {
-  #Bootstrap CI and predictions       #takes 40 secs per n.boot per species  
-  system.time({
-    
-    # stratified sampling with replacement
-    fn.boot=function(dd)   
-    {
-      s=strata(dd,c("StartDate.yr"),size=table(dd$StartDate.yr), method="srswr") 
-      boot.d=getdata(dd,s)
-      return(boot.d)
-    }
-    
-    # fit models to bootstrapped data
-    fit.model.boot=function(DAT,init.pars) 
-    {
-      Fit <- gam(list(Number ~ 1,                                                 #Poisson process (intercept only as when possitive, it's mostly 1 individual)
-                      ~ s(StartDate.mn,k=12,bs='cc')+hrs.trawld+StartDate.yr+     #Probability
-                        s(long)+VESSEL), 
-                 data = DAT,
-                 family = ziplss,
-                 method = "REML",
-                 start=init.pars)
-      return(list(Fit=Fit))
-      #return(list(Fit=Fit,DAT=DAT))
-    }
-    
-    #Run boot in parallel
-    cores=detectCores()      #setup parallel backend to use many processors
-    cl <- makeCluster(cores[1]-1) #leave 1 core not to overload your computer
-    registerDoParallel(cl)
-    STORE.BOOT=vector('list',length(Species))
-    names(STORE.BOOT)=Species
-    for(i in 1:length(Species))   
-    {
-      #parallel processing
-      Store.boot=foreach(k=1:n.boot,.errorhandling='remove',.packages=c('sampling','mgcv')) %dopar%
-        {
-          mod=fit.model.boot(DAT=fn.boot(dd=Model.out[[i]]$DATA),init.pars=round(coef(Model.out[[i]]$GAM_ZIP),3))
-          return(mod)
-          rm(mod)
-        }
-      STORE.BOOT[[i]]=Store.boot
-    }
-    stopCluster(cl)  #stop cluster
-    
-    #Model predictions
-    fun.percentiles=function(d,var)
-    {
-      d1=d%>%
-        dplyr::select(all_of(var))%>%
-        mutate(MEAN=apply(d[,-1], 1, function(x) median(x, na.rm=T)),
-               SD=apply(d[,-1], 1, function(x) sd(x, na.rm=T)),
-               CV=100*SD/MEAN,
-               LOW=apply(d[,-1], 1, function(x) quantile(x, 0.025,na.rm=T)),
-               UP=apply(d[,-1], 1, function(x) quantile(x, 0.975,na.rm=T)))
-      return(d1)
-    }
-    STORE.BOOT.preds=vector('list',length(Species))
-    names(STORE.BOOT.preds)=Species
+  STORE.BOOT.preds=vector('list',length(Species))
+  names(STORE.BOOT.preds)=Species
+  
+  #Asymptotic errors CI and predictiosn
+  if(do.asymptotic.error)  
+  {
     Pred.ZIP.GAM=function(MOD,d,Pred.term,BY)
     {
       #Create new data frame
@@ -1735,7 +1685,7 @@ if(Fit.To=='Number')
         }
       }
       
-      pred <- predict(MOD, newd, type = "link")
+      pred <- predict(MOD, newd, type = "link",se.fit=T)
       #head(pred) #The first column is the predicted value of the response from the Poisson part of the model
       #      on the scale of the linear predictor (the log scale). 
       # The second column is the predicted value from the zero-inflation component and is 
@@ -1743,181 +1693,352 @@ if(Fit.To=='Number')
       
       #Back transform to the respective response scales and then multiply together
       ilink <- binomial(link = "cloglog")$linkinv
-      newd <- transform(newd, fitted = exp(pred[,1]) * ilink(pred[,2]))
+      newd <- transform(newd, fitted = exp(pred$fit[,1]) * ilink(pred$fit[,2]))
+      
+      newd.low95 <- transform(newd, fitted = exp(pred$fit[,1]-1.96*pred$se.fit[,1]) * ilink(pred$fit[,2]-1.96*pred$se.fit[,2]))
+      newd.up95 <- transform(newd, fitted = exp(pred$fit[,1]+1.96*pred$se.fit[,1]) * ilink(pred$fit[,2]+1.96*pred$se.fit[,2]))
+      newd$LOW=newd.low95$fitted
+      newd$UP=newd.up95$fitted
+      newd=newd[,c(Pred.term,'fitted','LOW','UP')]
+      names(newd)[2]=c('MEAN')
       return(newd)
     }
+    
     for(i in 1:length(Species))   
     {
       #Year effect
-      Pred.StartDate.yr=vector('list',n.boot)
-      for(k in 1:n.boot)
-      {
-        out=Pred.ZIP.GAM(MOD=STORE.BOOT[[i]][[k]]$Fit,
-                         d=Model.out[[i]]$DATA,
-                         Pred.term="StartDate.yr",
-                         BY=NULL)
-        out=out[,c('StartDate.yr','fitted')]
-        names(out)[2]=paste("boot",k,sep='.')
-        Pred.StartDate.yr[[k]]=out  
-      }
-      Pred.StartDate.yr=do.call(cbind,Pred.StartDate.yr)
-      Pred.StartDate.yr=Pred.StartDate.yr[!duplicated(as.list(Pred.StartDate.yr))]
-      Pred.StartDate.yr=fun.percentiles(d=Pred.StartDate.yr,var='StartDate.yr')
+      Pred.StartDate.yr=Pred.ZIP.GAM(MOD=Model.out[[i]]$GAM_ZIP,
+                       d=Model.out[[i]]$DATA,
+                       Pred.term="StartDate.yr",
+                       BY=NULL)
       
-      #Vessel effect
-      # Pred.vessel=vector('list',n.boot)
-      # for(k in 1:n.boot)
-      # {
-      #   out=Pred.ZIP.GAM(MOD=STORE.BOOT[[i]][[k]]$Fit,
-      #                    d=Model.out[[i]]$DATA,
-      #                    Pred.term="VESSEL",
-      #                    BY=NULL)
-      #   out=out[,c('VESSEL','fitted')]
-      #   names(out)[2]=paste("boot",k,sep='.')
-      #   Pred.vessel[[k]]=out  
-      # }
-      # Pred.vessel=do.call(cbind,Pred.vessel)
-      # Pred.vessel=Pred.vessel[!duplicated(as.list(Pred.vessel))]
-      # Pred.vessel=fun.percentiles(d=Pred.vessel,var='VESSEL')
-      
+        #Vessel effect
+      # Pred.vessel=Pred.ZIP.GAM(MOD=Model.out[[i]]$GAM_ZIP,
+      #                          d=Model.out[[i]]$DATA,
+      #                          Pred.term="VESSEL",
+      #                          BY=NULL)
+
       #Month effect
-      Pred.StartDate.mn=vector('list',n.boot)
-      for(k in 1:n.boot)
-      {
-        out=Pred.ZIP.GAM(MOD=STORE.BOOT[[i]][[k]]$Fit,
+      Pred.StartDate.mn=Pred.ZIP.GAM(MOD=Model.out[[i]]$GAM_ZIP,
                          d=Model.out[[i]]$DATA,
                          Pred.term="StartDate.mn",
                          BY=0.1)
-        out=out[,c('StartDate.mn','fitted')]
-        names(out)[2]=paste("boot",k,sep='.')
-        Pred.StartDate.mn[[k]]=out  
-      }
-      Pred.StartDate.mn=do.call(cbind,Pred.StartDate.mn)
-      Pred.StartDate.mn=Pred.StartDate.mn[!duplicated(as.list(Pred.StartDate.mn))]
-      Pred.StartDate.mn=fun.percentiles(d=Pred.StartDate.mn,var='StartDate.mn')
       
-      #Longitudinal effect
-      Pred.long=vector('list',n.boot)
-      for(k in 1:n.boot)
-      {
-        out=Pred.ZIP.GAM(MOD=STORE.BOOT[[i]][[k]]$Fit,
+       #Longitudinal effect
+       Pred.long=Pred.ZIP.GAM(MOD=Model.out[[i]]$GAM_ZIP,
                          d=Model.out[[i]]$DATA,
                          Pred.term="long",
                          BY=0.1)
-        out=out[,c('long','fitted')]
-        names(out)[2]=paste("boot",k,sep='.')
-        Pred.long[[k]]=out  
-      }
-      Pred.long=do.call(cbind,Pred.long)
-      Pred.long=Pred.long[!duplicated(as.list(Pred.long))]
-      Pred.long=fun.percentiles(d=Pred.long,var='long')
-      
+
       #Trawled hours
-      Pred.hrs.trawld=vector('list',n.boot)
-      for(k in 1:n.boot)
-      {
-        out=Pred.ZIP.GAM(MOD=STORE.BOOT[[i]][[k]]$Fit,
+      Pred.hrs.trawld=Pred.ZIP.GAM(MOD=Model.out[[i]]$GAM_ZIP,
                          d=Model.out[[i]]$DATA,
                          Pred.term="hrs.trawld",
                          BY=0.1)
-        out=out[,c('hrs.trawld','fitted')]
-        names(out)[2]=paste("boot",k,sep='.')
-        Pred.hrs.trawld[[k]]=out  
-      }
-      Pred.hrs.trawld=do.call(cbind,Pred.hrs.trawld)
-      Pred.hrs.trawld=Pred.hrs.trawld[!duplicated(as.list(Pred.hrs.trawld))]
-      Pred.hrs.trawld=fun.percentiles(d=Pred.hrs.trawld,var='hrs.trawld')
       
       STORE.BOOT.preds[[i]]=list(Pred.StartDate.yr=Pred.StartDate.yr,
                                  Pred.StartDate.mn=Pred.StartDate.mn,
                                  Pred.long=Pred.long,
                                  Pred.hrs.trawld=Pred.hrs.trawld)
     }
-    
-    #Plot median and CI
-    fn.relative=function(D)
-    {
-      Mn=mean(D$MEAN)
-      D$LOW=D$LOW/Mn
-      D$UP=D$UP/Mn
-      D$MEAN=D$MEAN/Mn
-      return(D)
-    }
-    CI.fun=function(x,LOW1,UP1,Colr,Colr2)
-    {
-      x.Vec <- c(x, tail(x, 1), rev(x), x[1]) 
-      y.Vec <- c(LOW1, tail(UP1, 1), rev(UP1), LOW1[1])
-      polygon(x.Vec, y.Vec, col = Colr, border = Colr2)
-    }
-    fn.trasn=function(x) rgb(t(col2rgb(x)), alpha=40, maxColorValue = 255)
-    fun.plot.pred=function(Narrow,Green,normalised,xlab)
-    {
-      if(normalised=="YES")
+  }
+  
+  #Bootstrap CI and predictions       #takes 40 secs per n.boot per species 
+  if(do.boot) 
+  {
+    system.time({
+      
+      # stratified sampling with replacement
+      fn.boot=function(dd)   
       {
-        Narrow=fn.relative(Narrow)
-        Green=fn.relative(Green)
+        s=strata(dd,c("StartDate.yr"),size=table(dd$StartDate.yr), method="srswr") 
+        boot.d=getdata(dd,s)
+        return(boot.d)
       }
-      if(colnames(Narrow)[1]%in%FACTORS)  
+      
+      # fit models to bootstrapped data
+      fit.model.boot=function(DAT,init.pars) 
       {
-        yr=as.numeric(as.character(Narrow[,1]))
-        plot(yr,Narrow$MEAN,pch=19,main="",xlab="",ylab="",col=CL1,
-                          cex=1.25,cex.axis=1.25,ylim=c(0,max(c(Narrow$UP,Green$UP))))
-        suppressWarnings(with(Narrow,arrows(x0=yr, y0=LOW, x1=yr, y1=UP,col=CL1,code = 3,angle=90,length=.025)))
-        
-        points(yr+.25,Green$MEAN,pch=19,col=CL2)
-        suppressWarnings(with(Green,arrows(x0=yr+.25, y0=LOW, x1=yr+.25, y1=UP,col=CL2,code = 3,angle=90,length=.025)))
-      }else
-      {
-        plot(Narrow[,1],Narrow$MEAN,type='l',main="",xlab="",ylab="",col=CL1,
-             lwd=2,cex.axis=1.25,ylim=c(0,max(c(Narrow$UP,Green$UP))))
-        CI.fun(x=Narrow[,1],LOW1=Narrow$LOW,UP1=Narrow$UP,Colr=fn.trasn(CL1),Colr2="transparent")
-        CI.fun(x=Green[,1],LOW1=Green$LOW,UP1=Green$UP,Colr=fn.trasn(CL2),Colr2="transparent")
-        lines(Narrow[,1],Narrow$MEAN,type='l',lwd=2,col=CL1)
-        lines(Green[,1],Green$MEAN,type='l',lwd=2,col=CL2)
-        
+        Fit <- gam(list(Number ~ 1,                                                 #Poisson process (intercept only as when possitive, it's mostly 1 individual)
+                        ~ s(StartDate.mn,k=12,bs='cc')+hrs.trawld+StartDate.yr+     #Probability
+                          s(long)+VESSEL), 
+                   data = DAT,
+                   family = ziplss,
+                   method = "REML",
+                   start=init.pars)
+        return(list(Fit=Fit))
+        #return(list(Fit=Fit,DAT=DAT))
       }
-      mtext(xlab,1,line=2.2,cex=1.15)
-    }
-    XLAB=c('Financial year',"Month",expression(paste("Longitude (",degree,"E)",sep="")),"Effort (trawled hours)")
-    
-    fn.fig("Figure 3_relative",1600,2400)
-    par(mfrow=c(4,1),mai=c(.3,.38,.175,.1),oma=c(2,1.25,.1,.1),las=1,mgp=c(.04,.6,0))
-    for(i in 1:length(XLAB))
+      
+      #Run boot in parallel
+      cores=detectCores()      #setup parallel backend to use many processors
+      cl <- makeCluster(cores[1]-1) #leave 1 core not to overload your computer
+      registerDoParallel(cl)
+      STORE.BOOT=vector('list',length(Species))
+      names(STORE.BOOT)=Species
+      for(i in 1:length(Species))   
+      {
+        #parallel processing
+        Store.boot=foreach(k=1:n.boot,.errorhandling='remove',.packages=c('sampling','mgcv')) %dopar%
+          {
+            mod=fit.model.boot(DAT=fn.boot(dd=Model.out[[i]]$DATA),init.pars=round(coef(Model.out[[i]]$GAM_ZIP),3))
+            return(mod)
+            rm(mod)
+          }
+        STORE.BOOT[[i]]=Store.boot
+      }
+      stopCluster(cl)  #stop cluster
+      
+      #Model predictions
+      fun.percentiles=function(d,var)
+      {
+        d1=d%>%
+          dplyr::select(all_of(var))%>%
+          mutate(MEAN=apply(d[,-1], 1, function(x) median(x, na.rm=T)),
+                 SD=apply(d[,-1], 1, function(x) sd(x, na.rm=T)),
+                 CV=100*SD/MEAN,
+                 LOW=apply(d[,-1], 1, function(x) quantile(x, 0.025,na.rm=T)),
+                 UP=apply(d[,-1], 1, function(x) quantile(x, 0.975,na.rm=T)))
+        return(d1)
+      }
+      Pred.ZIP.GAM=function(MOD,d,Pred.term,BY)
+      {
+        #Create new data frame
+        d.vars=unique(unlist(lapply(formula(MOD)[1:2],all.vars))[-1])
+        add.this=d.vars[-match(Pred.term,d.vars)]
+        if(Pred.term%in%FACTORS) 
+        {
+          newd=data.frame(factor=levels(d[,Pred.term]))
+        }else
+        {
+          newd=d[,Pred.term]
+          newd=data.frame(seq(min(newd),max(newd),BY))
+        }
+        colnames(newd)=Pred.term 
+        add.dummy=data.frame(matrix(nrow=nrow(newd),ncol=length(add.this)))
+        colnames(add.dummy)=add.this
+        newd=cbind(newd,add.dummy)
+        for(ii in 1:length(add.this))
+        {
+          if(add.this[ii]%in%FACTORS)
+          {
+            newd[,add.this[ii]]=factor(names(sort(table(d[,add.this[ii]]))[1]),levels(d[,add.this[ii]]))
+          }else
+          {
+            newd[,add.this[ii]]= mean(d[,add.this[ii]])
+          }
+        }
+        
+        pred <- predict(MOD, newd, type = "link")
+        #head(pred) #The first column is the predicted value of the response from the Poisson part of the model
+        #      on the scale of the linear predictor (the log scale). 
+        # The second column is the predicted value from the zero-inflation component and is 
+        #     on the complementary log-log scale
+        
+        #Back transform to the respective response scales and then multiply together
+        ilink <- binomial(link = "cloglog")$linkinv
+        newd <- transform(newd, fitted = exp(pred[,1]) * ilink(pred[,2]))
+        return(newd)
+      }
+      for(i in 1:length(Species))   
+      {
+        #Year effect
+        Pred.StartDate.yr=vector('list',n.boot)
+        for(k in 1:n.boot)
+        {
+          out=Pred.ZIP.GAM(MOD=STORE.BOOT[[i]][[k]]$Fit,
+                           d=Model.out[[i]]$DATA,
+                           Pred.term="StartDate.yr",
+                           BY=NULL)
+          out=out[,c('StartDate.yr','fitted')]
+          names(out)[2]=paste("boot",k,sep='.')
+          Pred.StartDate.yr[[k]]=out  
+        }
+        Pred.StartDate.yr=do.call(cbind,Pred.StartDate.yr)
+        Pred.StartDate.yr=Pred.StartDate.yr[!duplicated(as.list(Pred.StartDate.yr))]
+        Pred.StartDate.yr=fun.percentiles(d=Pred.StartDate.yr,var='StartDate.yr')
+        
+        #Vessel effect
+        # Pred.vessel=vector('list',n.boot)
+        # for(k in 1:n.boot)
+        # {
+        #   out=Pred.ZIP.GAM(MOD=STORE.BOOT[[i]][[k]]$Fit,
+        #                    d=Model.out[[i]]$DATA,
+        #                    Pred.term="VESSEL",
+        #                    BY=NULL)
+        #   out=out[,c('VESSEL','fitted')]
+        #   names(out)[2]=paste("boot",k,sep='.')
+        #   Pred.vessel[[k]]=out  
+        # }
+        # Pred.vessel=do.call(cbind,Pred.vessel)
+        # Pred.vessel=Pred.vessel[!duplicated(as.list(Pred.vessel))]
+        # Pred.vessel=fun.percentiles(d=Pred.vessel,var='VESSEL')
+        
+        #Month effect
+        Pred.StartDate.mn=vector('list',n.boot)
+        for(k in 1:n.boot)
+        {
+          out=Pred.ZIP.GAM(MOD=STORE.BOOT[[i]][[k]]$Fit,
+                           d=Model.out[[i]]$DATA,
+                           Pred.term="StartDate.mn",
+                           BY=0.1)
+          out=out[,c('StartDate.mn','fitted')]
+          names(out)[2]=paste("boot",k,sep='.')
+          Pred.StartDate.mn[[k]]=out  
+        }
+        Pred.StartDate.mn=do.call(cbind,Pred.StartDate.mn)
+        Pred.StartDate.mn=Pred.StartDate.mn[!duplicated(as.list(Pred.StartDate.mn))]
+        Pred.StartDate.mn=fun.percentiles(d=Pred.StartDate.mn,var='StartDate.mn')
+        
+        #Longitudinal effect
+        Pred.long=vector('list',n.boot)
+        for(k in 1:n.boot)
+        {
+          out=Pred.ZIP.GAM(MOD=STORE.BOOT[[i]][[k]]$Fit,
+                           d=Model.out[[i]]$DATA,
+                           Pred.term="long",
+                           BY=0.1)
+          out=out[,c('long','fitted')]
+          names(out)[2]=paste("boot",k,sep='.')
+          Pred.long[[k]]=out  
+        }
+        Pred.long=do.call(cbind,Pred.long)
+        Pred.long=Pred.long[!duplicated(as.list(Pred.long))]
+        Pred.long=fun.percentiles(d=Pred.long,var='long')
+        
+        #Trawled hours
+        Pred.hrs.trawld=vector('list',n.boot)
+        for(k in 1:n.boot)
+        {
+          out=Pred.ZIP.GAM(MOD=STORE.BOOT[[i]][[k]]$Fit,
+                           d=Model.out[[i]]$DATA,
+                           Pred.term="hrs.trawld",
+                           BY=0.1)
+          out=out[,c('hrs.trawld','fitted')]
+          names(out)[2]=paste("boot",k,sep='.')
+          Pred.hrs.trawld[[k]]=out  
+        }
+        Pred.hrs.trawld=do.call(cbind,Pred.hrs.trawld)
+        Pred.hrs.trawld=Pred.hrs.trawld[!duplicated(as.list(Pred.hrs.trawld))]
+        Pred.hrs.trawld=fun.percentiles(d=Pred.hrs.trawld,var='hrs.trawld')
+        
+        STORE.BOOT.preds[[i]]=list(Pred.StartDate.yr=Pred.StartDate.yr,
+                                   Pred.StartDate.mn=Pred.StartDate.mn,
+                                   Pred.long=Pred.long,
+                                   Pred.hrs.trawld=Pred.hrs.trawld)
+      }
+    })
+  }
+  
+  
+  #Plot median and CI  
+  SCALER=1000  #present absolute catch per 1000 trawled hours
+  fn.relative=function(D)
+  {
+    Mn=mean(D$MEAN)
+    D$LOW=D$LOW/Mn
+    D$UP=D$UP/Mn
+    D$MEAN=D$MEAN/Mn
+    return(D)
+  }
+  CI.fun=function(x,LOW1,UP1,Colr,Colr2)
+  {
+    x.Vec <- c(x, tail(x, 1), rev(x), x[1]) 
+    y.Vec <- c(LOW1, tail(UP1, 1), rev(UP1), LOW1[1])
+    polygon(x.Vec, y.Vec, col = Colr, border = Colr2)
+  }
+  fn.trasn=function(x) rgb(t(col2rgb(x)), alpha=40, maxColorValue = 255)
+  fun.plot.pred=function(Narrow,Green,normalised,xlab,scaler)
+  {
+    if(normalised=="YES")
     {
-      fun.plot.pred(Narrow=STORE.BOOT.preds$SawfishNarrow[[i]],
-                    Green=STORE.BOOT.preds$SawfishGreen[[i]],
-                    normalised="YES",
-                    xlab=XLAB[i])
-      if(i==1) legend("topleft",c("Narrow sawfish","Green sawfish"),text.col=c(CL1,CL2),bty='n',cex=1.5)
+      Narrow=fn.relative(Narrow)
+      Green=fn.relative(Green)
+    }
+    Narrow=Narrow%>%
+            mutate(MEAN=MEAN*scaler,
+                   LOW=LOW*scaler,
+                   UP=UP*scaler)
+    Green=Green%>%
+            mutate(MEAN=MEAN*scaler,
+                   LOW=LOW*scaler,
+                   UP=UP*scaler)
+    if(colnames(Narrow)[1]%in%FACTORS)  
+    {
+      yr=as.numeric(as.character(Narrow[,1]))
+      plot(yr,Narrow$MEAN,pch=19,main="",xlab="",ylab="",col=CL1,
+           cex=1.25,cex.axis=1.25,ylim=c(0,max(c(Narrow$UP,Green$UP))))
+      suppressWarnings(with(Narrow,arrows(x0=yr, y0=LOW, x1=yr, y1=UP,col=CL1,code = 3,angle=90,length=.025)))
+      
+      points(yr+.25,Green$MEAN,pch=19,col=CL2)
+      suppressWarnings(with(Green,arrows(x0=yr+.25, y0=LOW, x1=yr+.25, y1=UP,col=CL2,code = 3,angle=90,length=.025)))
+    }else
+    {
+      plot(Narrow[,1],Narrow$MEAN,type='l',main="",xlab="",ylab="",col=CL1,
+           lwd=2,cex.axis=1.25,ylim=c(0,max(c(Narrow$UP,Green$UP))))
+      CI.fun(x=Narrow[,1],LOW1=Narrow$LOW,UP1=Narrow$UP,Colr=fn.trasn(CL1),Colr2="transparent")
+      CI.fun(x=Green[,1],LOW1=Green$LOW,UP1=Green$UP,Colr=fn.trasn(CL2),Colr2="transparent")
+      lines(Narrow[,1],Narrow$MEAN,type='l',lwd=2,col=CL1)
+      lines(Green[,1],Green$MEAN,type='l',lwd=2,col=CL2)
       
     }
-    mtext("Relative catch",2,outer=T,las=3,cex=1.25,line=-.25)
-    dev.off()
+    mtext(xlab,1,line=2.2,cex=1.15)
+  }
+  XLAB=c('Financial year',"Month",expression(paste("Longitude (",degree,"E)",sep="")),"Effort (trawled hours)")
+  
+  fn.fig("Figure 3_relative",1600,2400)
+  par(mfrow=c(4,1),mai=c(.3,.38,.175,.1),oma=c(2,1.25,.1,.1),las=1,mgp=c(.04,.6,0))
+  for(i in 1:length(XLAB))
+  {
+    SKLR=1
+    fun.plot.pred(Narrow=STORE.BOOT.preds$SawfishNarrow[[i]],
+                  Green=STORE.BOOT.preds$SawfishGreen[[i]],
+                  normalised="YES",
+                  xlab=XLAB[i],
+                  scaler=SKLR)
+    if(i==1) legend("topleft",c("Narrow sawfish","Green sawfish"),text.col=c(CL1,CL2),bty='n',cex=1.5)
     
-    fn.fig("Figure 3_absolute",1600,2400)
-    par(mfrow=c(4,1),mai=c(.3,.6,.175,.1),oma=c(2,1.25,.1,.1),las=1,mgp=c(.04,.6,0))
-    for(i in 1:length(XLAB))
-    {
-      fun.plot.pred(Narrow=STORE.BOOT.preds$SawfishNarrow[[i]],
-                    Green=STORE.BOOT.preds$SawfishGreen[[i]],
-                    normalised="NO",
-                    xlab=XLAB[i])
-      if(i==1) legend("topleft",c("Narrow sawfish","Green sawfish"),text.col=c(CL1,CL2),bty='n',cex=1.5)
-      
-    }
-    mtext("                                   Numbers caught per trawled hour",2,outer=T,las=3,cex=1.25,line=-.25)
-    mtext("Numbers caught",2,line=4.2,las=3,cex=1.25)
-    dev.off()
+  }
+  mtext("Relative catch",2,outer=T,las=3,cex=1.25,line=-.25)
+  dev.off()
+  
+  fn.fig("Figure 3_absolute",1600,2400)
+  par(mfrow=c(4,1),mai=c(.3,.6,.175,.1),oma=c(2,1.25,.1,.1),las=1,mgp=c(.04,.6,0))
+  for(i in 1:length(XLAB))
+  {
+    SKLR=SCALER
+    if(grepl("trawled hours",XLAB[i])) SKLR=1
+    fun.plot.pred(Narrow=STORE.BOOT.preds$SawfishNarrow[[i]],
+                  Green=STORE.BOOT.preds$SawfishGreen[[i]],
+                  normalised="NO",
+                  xlab=XLAB[i],
+                  scaler=SKLR)
+    if(i==1) legend("topleft",c("Narrow sawfish","Green sawfish"),text.col=c(CL1,CL2),bty='n',cex=1.5)
     
-    #Export annual catch rates
-    OUT=STORE.BOOT.preds$SawfishNarrow$Pred.StartDate.yr%>%
-      rename(FINYEAR=StartDate.yr)
-    write.csv(OUT,'C:/Matias/Analyses/Data_outs/Narrow sawfish/CPUE_Pilbara.trawl.csv',row.names = F)
-    OUT=STORE.BOOT.preds$SawfishGreen$Pred.StartDate.yr%>%
-      rename(FINYEAR=StartDate.yr)
-    write.csv(OUT,'C:/Matias/Analyses/Data_outs/Green sawfish/CPUE_Pilbara.trawl.csv',row.names = F)
-    
-  })
+  }
+  mtext(paste("                               Numbers caught per",SCALER,"trawled hours"),2,
+        outer=T,las=3,cex=1.25,line=-.5)
+  mtext("Numbers caught",2,line=3.95,las=3,cex=1.25)
+  
+  #Inset total annual effort
+  Effort=Data%>%
+    group_by(StartDate.yr)%>%
+    summarise(Effort=sum(hrs.trawld)/1000)
+  par(fig = c(.065,.5, .075, .225), new = T,mgp=c(1.1,.4,0),cex.axis=.8)  
+  plot(Effort$StartDate.yr,Effort$Effort,type='l',lwd=3,col=barcol,main="Annual effort",
+       ylim=c(0,max(Effort$Effort)),xlab="Financial year",
+       ylab="1000 trawled hours")
+  
+  dev.off()
+  #Export annual catch rates
+  OUT=STORE.BOOT.preds$SawfishNarrow$Pred.StartDate.yr%>%
+    rename(FINYEAR=StartDate.yr)
+  write.csv(OUT,'C:/Matias/Analyses/Data_outs/Narrow sawfish/CPUE_Pilbara.trawl.csv',row.names = F)
+  OUT=STORE.BOOT.preds$SawfishGreen$Pred.StartDate.yr%>%
+    rename(FINYEAR=StartDate.yr)
+  write.csv(OUT,'C:/Matias/Analyses/Data_outs/Green sawfish/CPUE_Pilbara.trawl.csv',row.names = F)
+  
+
 }
 
 #-- Export Anova table  
