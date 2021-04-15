@@ -2038,7 +2038,15 @@ if(Fit.To=='Number')
     rename(FINYEAR=StartDate.yr)
   write.csv(OUT,'C:/Matias/Analyses/Data_outs/Green sawfish/CPUE_Pilbara.trawl.csv',row.names = F)
   
-
+  #Export total annual catch
+  Annual.catch=Data%>%
+    group_by(StartDate.yr)%>%
+    summarise(SawfishNarrowALIVE=sum(SawfishNarrowALIVE),
+              SawfishNarrowDEAD=sum(SawfishNarrowDEAD),
+              SawfishGreenALIVE=sum(SawfishGreenALIVE),
+              SawfishGreenDEAD=sum(SawfishGreenDEAD))
+  write.csv(Annual.catch,'C:/Matias/Analyses/Data_outs/recons_Pilbara_trawl_sawfish.csv',row.names = F)
+  
 }
 
 #-- Export Anova table  
