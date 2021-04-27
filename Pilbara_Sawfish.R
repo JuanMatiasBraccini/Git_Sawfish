@@ -32,13 +32,14 @@ library(doParallel)
 library(sampling)
 library(tidyverse)
 
+handl_OneDrive=function(x)paste('C:/Users/myb/OneDrive - Department of Primary Industries and Regional Development/Matias',x,sep='/')
 
-source("C:/Matias/Analyses/SOURCE_SCRIPTS/Git_Population.dynamics/fn.fig.R")
+source(handl_OneDrive("Analyses/SOURCE_SCRIPTS/Git_Population.dynamics/fn.fig.R"))
 Do.tiff="YES"   #select figure extension
 Do.jpeg="NO"
-source("C:/Matias/Analyses/SOURCE_SCRIPTS/Git_other/Plot.Map.R") 
+source(handl_OneDrive("Analyses/SOURCE_SCRIPTS/Git_other/Plot.Map.R")) 
 
-setwd('C:/Matias/Analyses/Sawfish/Pilbara')
+setwd(handl_OneDrive('Analyses/Sawfish/Pilbara'))
 #Data=read.csv('Data/data.csv',stringsAsFactors=F)
 #Data <- read_excel("Data/20210330_1549 - Output.xlsx", sheet = "Sheet1")
 Data=read.csv('Data/20210330_1549 - Output.csv',stringsAsFactors=F)
@@ -682,7 +683,7 @@ if(do.exploratory=="YES")
 
 # Final data manipulation-------------------------------------------------------------------------
 #Look at temperature
-Temp=read.csv("C:/Matias/Data/Oceanography/SST.csv")
+Temp=read.csv(handl_OneDrive("Data/Oceanography/SST.csv"))
 Temp=subset(Temp,Lat>(-21) & Lat<(-17) &Long<121 & Long>114)
 plot(Temp$Long,Temp$Lat)
 Temp$Temperature=Temp$value
@@ -1274,8 +1275,8 @@ if(do.map)
   add.depth="NO"
   if(add.depth=="YES")
   {
-    Bathymetry_120=read.table("C:/Matias/Data/Mapping/get_data112_120.cgi")
-    Bathymetry_138=read.table("C:/Matias/Data/Mapping/get_data120.05_138.cgi")
+    Bathymetry_120=read.table(handl_OneDrive("Data/Mapping/get_data112_120.cgi"))
+    Bathymetry_138=read.table(handl_OneDrive("Data/Mapping/get_data120.05_138.cgi"))
     Bathymetry=rbind(Bathymetry_120,Bathymetry_138)
     Bathymetry=Bathymetry[order(Bathymetry$V1,Bathymetry$V2),]
     xbat=sort(unique(Bathymetry$V1))
@@ -2033,10 +2034,10 @@ if(Fit.To=='Number')
   #Export annual catch rates
   OUT=STORE.BOOT.preds$SawfishNarrow$Pred.StartDate.yr%>%
     rename(FINYEAR=StartDate.yr)
-  write.csv(OUT,'C:/Matias/Analyses/Data_outs/Narrow sawfish/CPUE_Pilbara.trawl.csv',row.names = F)
+  write.csv(OUT,handl_OneDrive('Analyses/Data_outs/Narrow sawfish/CPUE_Pilbara.trawl.csv'),row.names = F)
   OUT=STORE.BOOT.preds$SawfishGreen$Pred.StartDate.yr%>%
     rename(FINYEAR=StartDate.yr)
-  write.csv(OUT,'C:/Matias/Analyses/Data_outs/Green sawfish/CPUE_Pilbara.trawl.csv',row.names = F)
+  write.csv(OUT,handl_OneDrive('Analyses/Data_outs/Green sawfish/CPUE_Pilbara.trawl.csv'),row.names = F)
   
   #Export total annual catch
   Annual.catch=Data%>%
@@ -2045,7 +2046,7 @@ if(Fit.To=='Number')
               SawfishNarrowDEAD=sum(SawfishNarrowDEAD),
               SawfishGreenALIVE=sum(SawfishGreenALIVE),
               SawfishGreenDEAD=sum(SawfishGreenDEAD))
-  write.csv(Annual.catch,'C:/Matias/Analyses/Data_outs/recons_Pilbara_trawl_sawfish.csv',row.names = F)
+  write.csv(Annual.catch,handl_OneDrive('Analyses/Data_outs/recons_Pilbara_trawl_sawfish.csv'),row.names = F)
   
 }
 
@@ -2704,7 +2705,7 @@ if(NOT.used=="YES")
   
   ####
   #Select best algorithm
-  source("C:/Matias/Analyses/SOURCE_SCRIPTS/Smart_par.R")
+  source(handl_OneDrive("Analyses/SOURCE_SCRIPTS/Smart_par.R"))
   fun.pred.auc=function(moDl,NMS,test)
   {
     pred.class=predict(moDl,test,type='raw',n.trees=moDl$bestTune$n.trees)  #predict yes or not
