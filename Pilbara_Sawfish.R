@@ -713,6 +713,10 @@ Data=merge(Data,subset(Ann.eff,select=c(StartDate.yr,Ann.eff)),by='StartDate.yr'
 Data$Day_night=with(Data,ifelse(Start.hour%in%6:18,"Day","Night"))
 Data$Season=with(Data,ifelse(StartDate.mn%in%3:8,"AuWin","SprSu")) #aggregation related to changes in Temp and algal blooms (Corey)
 
+#Data for Agustin
+write.csv(Data%>%dplyr::select(SawfishGreen,SawfishNarrow,long,lat,depth,Temperature,
+                               StartDate.yr,StartDate.mn,StartDate,hrs.trawld),
+          handl_OneDrive('Parks Australia/2025_project/Data/Data sets/WA/Pilbara_reported_sawfish.csv'),row.names = F)
 
 #Remove unvalidated records for unknown vessel
 Data=subset(Data,!VESSEL=="")
